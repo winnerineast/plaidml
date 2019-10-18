@@ -537,9 +537,54 @@ std::shared_ptr<TileProgram> TileBuilder::MakeProgram(  //
   return program;
 }
 
+// TODO: From the AST version
+// std::vector<ExprPtr> ComputeGradients(const std::vector<ExprPtr>& wrts, const ExprPtr& loss) {
+//   ExprPtr value = loss;
+//   auto ndims = loss->shape.dims.size();
+//   if (ndims) {
+//     auto cion = std::make_shared<ContractionExpr>();
+//     cion->agg_op = AggregationOp::SUM;
+//     cion->combo_op = CombinationOp::NONE;
+//     std::vector<PolyExprPtr> idxs;
+//     for (size_t i = 0; i < ndims; i++) {
+//       idxs.push_back(std::make_shared<PolyIndex>(i));
+//     }
+//     cion->srcs = {std::make_shared<IndexMapExpr>(loss, idxs)};
+//     cion->sink_idxs = std::make_shared<IndexMapExpr>(nullptr, std::vector<PolyExprPtr>{});
+//     cion->sink_dims = std::make_shared<SizeMapExpr>(std::vector<DimExprPtr>{});
+//     cion->ComputeShape("");
+//     value = cion;
+//   }
+//   Gradient grad(value);
+//   std::vector<ExprPtr> ret(wrts.size());
+//   for (size_t i = 0; i < wrts.size(); i++) {
+//     ret[i] = grad.GetDerivative(wrts[i]);
+//   }
+//   return ret;
+// }
+
 std::vector<mlir::Value*> TileBuilder::ComputeGradients(llvm::ArrayRef<mlir::Value*> wrt, mlir::Value* loss) {
-  // TODO
-  return wrt;
+  IVLOG(1, "TODO: I reached the start of ComputeGradients!!!!!!!!!!!!!!!");
+  auto value = loss;  // TODO: clarify if anything needs to be changed due to the "shared_ptr -> *" port
+  auto ndims = GetShape(loss).dims.size();
+  if (ndims) {
+    // TODO: Ownership. I don't know how MLIR Tile ownership works so I just assumed everything is magically correct
+    std::vector<mlir::Value*> src_idxs;
+    for (size_t i = 0; i < ndims; ++i) {
+      src_idxs.push_back(MakeAffineIndexOp(""));
+    }
+    llvm::ArrayRef<mlir::Value*> srcs{MakeAffineSourceIndexMapOp(loss, src_idxs)};
+    auto sink = MakeAffineSinkIndexMapOp(llvm::ArrayRef<mlir::Value*>{});
+    auto sizes = MakeAffineSizeMapOp(llvm::ArrayRef<mlir::Value*>{});
+    auto cion = MakeConSumOp(srcs, sink, sizes);
+    value = cion;
+  }
+  // return wrt;    // TODO: This is the old passthrough, remove once things are ready
+  // TODO: initialize Gradient
+  std::vector<mlir::Value*> ret(wrt.size());
+  // TODO: Set each return value
+  IVLOG(1, "TODO: I reached current end of ComputeGradients!!!!!!!!!!!");
+  return ret;  // TODO: Extremely broken until other TODOs of this function are finished
 }
 
 }  // namespace tile
