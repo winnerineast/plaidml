@@ -44,11 +44,25 @@ class Environment : public ::testing::Environment {
 
 lang::RunInfo example() {
   using plaidml::edsl::LogicalShape;
-  using vertexai::tile::lib::LoadConv2dBnRelu;
-  LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
-  LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
-  LogicalShape C(PLAIDML_DATA_FLOAT32, {128});
-  return LoadConv2dBnRelu("foo", I, K, C, {16, 112, 112, 128});
+  using vertexai::tile::lib::LoadMaxPool2d;
+  LogicalShape A(PLAIDML_DATA_FLOAT32, {1, 64, 64, 3});
+  return LoadMaxPool2d("maxpool", A);
+
+  // using vertexai::tile::lib::LoadMatMul;
+  // LogicalShape A(PLAIDML_DATA_FLOAT32, {3, 32});
+  // LogicalShape B(PLAIDML_DATA_FLOAT32, {32, 64});
+  // return LoadMatMul("matmul", A, B);
+
+  // using vertexai::tile::lib::LoadConv2dRelu;
+  // LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
+  // LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
+  // return LoadConv2dBnRelu("conv-relu", I, K, {16, 112, 112, 128});
+
+  // using vertexai::tile::lib::LoadConv2dBnRelu;
+  // LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
+  // LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
+  // LogicalShape C(PLAIDML_DATA_FLOAT32, {128});
+  // return LoadConv2dBnRelu("conv-bn-relu", I, K, C, {16, 112, 112, 128});
 }
 
 template <typename Pass, typename Config>
@@ -72,26 +86,26 @@ TEST_P(TranscodeTest, Classic_MLIR_Classic) {
   if (GetParam()) {
     codegen::CompilerState cstate{prog};
 
-    IVLOG(1, "Adding a memory location");
-    codegen::proto::LocateMemoryPass lmp;
-    auto lmp_dev = lmp.mutable_loc()->add_devs();
-    lmp_dev->set_name("OuterMem");
-    lmp_dev->add_units()->set_offset(0);
-    lmp_dev = lmp.mutable_loc()->add_devs();
-    lmp_dev->set_name("InnerMem");
-    lmp_dev->add_units()->set_offset(1);
-    codegen::LocateMemoryPass{lmp}.Apply(&cstate);
+    // IVLOG(1, "Adding a memory location");
+    // codegen::proto::LocateMemoryPass lmp;
+    // auto lmp_dev = lmp.mutable_loc()->add_devs();
+    // lmp_dev->set_name("OuterMem");
+    // lmp_dev->add_units()->set_offset(0);
+    // lmp_dev = lmp.mutable_loc()->add_devs();
+    // lmp_dev->set_name("InnerMem");
+    // lmp_dev->add_units()->set_offset(1);
+    // codegen::LocateMemoryPass{lmp}.Apply(&cstate);
 
-    IVLOG(1, "Adding an executor location");
-    codegen::proto::LocateBlockPass lbp;
-    lbp.add_reqs("main");
-    auto lbp_dev = lbp.mutable_loc()->add_devs();
-    lbp_dev->set_name("OuterExecutor");
-    lbp_dev->add_units()->set_offset(0);
-    lbp_dev = lbp.mutable_loc()->add_devs();
-    lbp_dev->set_name("InnerExecutor");
-    lbp_dev->add_units()->set_offset(1);
-    codegen::LocateBlockPass{lbp}.Apply(&cstate);
+    // IVLOG(1, "Adding an executor location");
+    // codegen::proto::LocateBlockPass lbp;
+    // lbp.add_reqs("main");
+    // auto lbp_dev = lbp.mutable_loc()->add_devs();
+    // lbp_dev->set_name("OuterExecutor");
+    // lbp_dev->add_units()->set_offset(0);
+    // lbp_dev = lbp.mutable_loc()->add_devs();
+    // lbp_dev->set_name("InnerExecutor");
+    // lbp_dev->add_units()->set_offset(1);
+    // codegen::LocateBlockPass{lbp}.Apply(&cstate);
   }
 
   IVLOG(2, "Original version:");

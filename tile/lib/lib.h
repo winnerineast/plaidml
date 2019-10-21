@@ -26,6 +26,9 @@ Tensor Convolution(const Tensor& I,                                             
                    ConvolutionFormat I_format = ConvolutionFormat::ChannelsLast,  //
                    ConvolutionFormat K_format = ConvolutionFormat::ChannelsLast);
 
+lang::RunInfo LoadMaxPool2d(const std::string& name,  //
+                            const LogicalShape& input);
+
 lang::RunInfo LoadMatMul(const std::string& name,     //
                          const LogicalShape& input1,  //
                          const LogicalShape& input2);
