@@ -2,6 +2,8 @@ package(default_visibility = ["@//visibility:public"])
 
 load("@com_intel_plaidml//vendor/mlir:mlir.bzl", "mlir_tblgen")
 
+exports_files(["LICENSE.TXT"])
+
 PLATFORM_COPTS = select({
     "@com_intel_plaidml//toolchain:macos_x86_64": [
         "-std=c++14",
@@ -36,6 +38,7 @@ cc_binary(
     name = "mlir-tblgen",
     srcs = glob([
         "tools/mlir-tblgen/*.cpp",
+        "tools/mlir-tblgen/*.h",
     ]),
     copts = PLATFORM_COPTS,
     includes = ["include"],
@@ -53,6 +56,38 @@ cc_binary(
         ":Support",
         ":TableGen",
     ],
+)
+
+mlir_tblgen(
+    name = "gen-call-interfaces-decls",
+    src = "include/mlir/Analysis/CallInterfaces.td",
+    out = "include/mlir/Analysis/CallInterfaces.h.inc",
+    action = "-gen-op-interface-decls",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-call-interfaces-defs",
+    src = "include/mlir/Analysis/CallInterfaces.td",
+    out = "include/mlir/Analysis/CallInterfaces.cpp.inc",
+    action = "-gen-op-interface-defs",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-infer-type-op-interface-decls",
+    src = "include/mlir/Analysis/InferTypeOpInterface.td",
+    out = "include/mlir/Analysis/InferTypeOpInterface.h.inc",
+    action = "-gen-op-interface-decls",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-infer-type-op-interface-defs",
+    src = "include/mlir/Analysis/InferTypeOpInterface.td",
+    out = "include/mlir/Analysis/InferTypeOpInterface.cpp.inc",
+    action = "-gen-op-interface-defs",
+    incs = ["include"],
 )
 
 mlir_tblgen(
@@ -202,8 +237,8 @@ mlir_tblgen(
 cc_library(
     name = "StandardOps",
     srcs = glob([
-        "lib/Dialect/StandardOps/**/*.h",
-        "lib/Dialect/StandardOps/**/*.cpp",
+        "lib/Dialect/StandardOps/*.cpp",
+        "lib/Dialect/StandardOps/*.h",
     ]),
     hdrs = [
         "include/mlir/Dialect/StandardOps/Ops.cpp.inc",
@@ -212,9 +247,9 @@ cc_library(
     copts = PLATFORM_COPTS,
     includes = ["include"],
     deps = [
+        ":gen-call-interfaces-decls",
         ":gen-standard-op-decls",
         ":gen-standard-op-defs",
-        "@llvm//:core",
         "@llvm//:support",
     ],
     alwayslink = 1,
@@ -252,6 +287,7 @@ cc_library(
     srcs = glob([
         "lib/Support/FileUtilities.cpp",
         "lib/Support/StorageUniquer.cpp",
+        "lib/Support/ToolUtilities.cpp",
     ]),
     copts = PLATFORM_COPTS,
     includes = ["include"],
@@ -269,6 +305,7 @@ cc_library(
     copts = PLATFORM_COPTS,
     includes = ["include"],
     deps = [
+        ":Analysis",
         "@llvm//:support",
     ],
 )
@@ -292,6 +329,7 @@ cc_library(
         ":gen-llvm-enum-defs",
         ":gen-llvm-op-decls",
         ":gen-llvm-op-defs",
+        ":Analysis",
         "@llvm//:asm_parser",
         "@llvm//:core",
         "@llvm//:support",
@@ -396,6 +434,8 @@ cc_library(
     includes = ["include"],
     deps = [
         ":Support",
+        ":gen-call-interfaces-decls",
+        ":gen-call-interfaces-defs",
         "@llvm//:support",
     ],
 )
@@ -427,12 +467,20 @@ cc_library(
         "lib/Analysis/*.cpp",
         "lib/Analysis/*.h",
     ]),
+    hdrs = [
+        "include/mlir/Analysis/CallInterfaces.h.inc",
+    ],
     copts = PLATFORM_COPTS,
     includes = ["include"],
     deps = [
         ":AffineOps",
         ":LoopOps",
         ":VectorOps",
+        ":gen-call-interfaces-decls",
+        ":gen-call-interfaces-defs",
+        ":gen-infer-type-op-interface-decls",
+        ":gen-infer-type-op-interface-defs",
+        "@llvm//:support",
     ],
 )
 
@@ -560,20 +608,62 @@ cc_library(
     ],
 )
 
+mlir_tblgen(
+    name = "gen-test-ops-decls",
+    src = "test/lib/TestDialect/TestOps.td",
+    out = "test/lib/TestDialect/TestOps.h.inc",
+    action = "-gen-op-decls",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-test-ops-defs",
+    src = "test/lib/TestDialect/TestOps.td",
+    out = "test/lib/TestDialect/TestOps.cpp.inc",
+    action = "-gen-op-defs",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-test-ops-rewriters",
+    src = "test/lib/TestDialect/TestOps.td",
+    out = "test/lib/TestDialect/TestPatterns.inc",
+    action = "-gen-rewriters",
+    incs = ["include"],
+)
+
+cc_library(
+    name = "TestDialect",
+    srcs = glob([
+        "test/lib/TestDialect/*.cpp",
+        "test/lib/TestDialect/*.h",
+    ]),
+    copts = PLATFORM_COPTS,
+    includes = ["test/lib/TestDialect"],
+    deps = [
+        ":Analysis",
+        ":Dialect",
+        ":IR",
+        ":Pass",
+        ":TransformUtils",
+        ":Transforms",
+        ":gen-test-ops-decls",
+        ":gen-test-ops-defs",
+        ":gen-test-ops-rewriters",
+    ],
+    alwayslink = 1,
+)
+
 cc_library(
     name = "TestTransforms",
     srcs = glob([
         "test/lib/Transforms/**/*.cpp",
     ]),
     copts = PLATFORM_COPTS,
-    visibility = ["//visibility:public"],
     deps = [
-        ":AffineOps",
-        ":Analysis",
-        ":LoopOps",
-        ":Pass",
+        ":TestDialect",
         ":TransformUtils",
-        ":VectorOps",
+        "@llvm//:support",
     ],
     alwayslink = 1,
 )

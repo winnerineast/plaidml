@@ -11,6 +11,7 @@
 
 #include <boost/format.hpp>
 
+#include "base/util/env.h"
 #include "base/util/logging.h"
 #include "plaidml2/core/internal.h"
 #include "plaidml2/edsl/derivs.h"
@@ -83,8 +84,16 @@ mlir::Value* MakeAffineOp(plaidml_int_op op, const std::vector<mlir::Value*> ope
       return builder->MakeAffineNegOp(operands);
     case PLAIDML_INT_OP_SUB:
       return builder->MakeAffineSubOp(operands);
+    case PLAIDML_INT_OP_MAX:
+      return builder->MakeAffineMaxOp(operands);
+    case PLAIDML_INT_OP_MIN:
+      return builder->MakeAffineMinOp(operands);
   }
   throw std::runtime_error("Unknown affine op");
+}
+
+static bool use_mlir() {  //
+  return vertexai::env::Get("PLAIDML_MLIR") == "1";
 }
 
 }  // namespace
@@ -264,9 +273,11 @@ void plaidml_expr_bind_dims(  //
     expr->expr->shape.bind_dims(&vec_dims);
     for (size_t i = 0; i < ndims; i++) {
       dims[i]->expr = vec_dims[i];
-      IVLOG(3, "bind_dims> i: " << i << ", from: " << expr->value << ", into: " << dims[i]->value);
-      IVLOG(3, "bind_dims> i: " << i << ", from: " << expr->expr->str());
-      GlobalContext::get()->BindTensorDim(i, expr->value, &dims[i]->value);
+      if (use_mlir()) {
+        IVLOG(3, "bind_dims> i: " << i << ", from: " << expr->value << ", into: " << dims[i]->value);
+        IVLOG(3, "bind_dims> i: " << i << ", from: " << expr->expr->str());
+        GlobalContext::get()->BindTensorDim(i, expr->value, &dims[i]->value);
+      }
     }
   });
 }
@@ -286,7 +297,11 @@ plaidml_expr* plaidml_expr_dim(  //
     plaidml_dim_expr* expr) {
   return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_expr_dim");
-    return new plaidml_expr{std::make_shared<DimExprExpr>(expr->expr), expr->value};
+    if (use_mlir()) {
+      return new plaidml_expr{std::make_shared<DimExprExpr>(expr->expr), expr->value};
+    } else {
+      return new plaidml_expr{std::make_shared<DimExprExpr>(expr->expr)};
+    }
   });
 }
 
@@ -311,8 +326,12 @@ plaidml_expr* plaidml_expr_placeholder(  //
         dims[i] = -1;
       }
     }
-    auto value = GlobalContext::get()->MakePlaceholderOp(shape->shape.dtype, dims);
-    return new plaidml_expr{expr, value};
+    if (use_mlir()) {
+      auto value = GlobalContext::get()->MakePlaceholderOp(shape->shape.dtype, dims);
+      return new plaidml_expr{expr, value};
+    } else {
+      return new plaidml_expr{expr};
+    }
   });
 }
 
@@ -387,8 +406,12 @@ plaidml_expr* plaidml_expr_none(  //
 ) {
   return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {  //
     IVLOG(3, "plaidml_expr_none");
-    auto value = GlobalContext::get()->MakeNoneOp();
-    return new plaidml_expr{std::make_shared<NoneExpr>(), value};
+    if (use_mlir()) {
+      auto value = GlobalContext::get()->MakeNoneOp();
+      return new plaidml_expr{std::make_shared<NoneExpr>(), value};
+    } else {
+      return new plaidml_expr{std::make_shared<NoneExpr>()};
+    }
   });
 }
 
@@ -404,8 +427,12 @@ plaidml_expr* plaidml_expr_tuple(  //
       exprs[i] = args[i]->expr;
       tuple[i] = args[i]->value;
     }
-    auto value = GlobalContext::get()->MakeTupleOp(tuple);
-    return new plaidml_expr{std::make_shared<TupleExpr>(exprs), value};
+    if (use_mlir()) {
+      auto value = GlobalContext::get()->MakeTupleOp(tuple);
+      return new plaidml_expr{std::make_shared<TupleExpr>(exprs), value};
+    } else {
+      return new plaidml_expr{std::make_shared<TupleExpr>(exprs)};
+    }
   });
 }
 
@@ -434,9 +461,15 @@ void plaidml_expr_tuple_get_exprs(  //
     if (!tuple_expr) {
       throw std::runtime_error("Expression is not a tuple");
     }
-    auto elts = GlobalContext::get()->GetTupleElements(expr->value);
-    for (size_t i = 0; i < std::min(nexprs, tuple_expr->exprs.size()); i++) {
-      exprs[i] = new plaidml_expr{tuple_expr->exprs[i], elts[i]};
+    if (use_mlir()) {
+      auto elts = GlobalContext::get()->GetTupleElements(expr->value);
+      for (size_t i = 0; i < std::min(nexprs, tuple_expr->exprs.size()); i++) {
+        exprs[i] = new plaidml_expr{tuple_expr->exprs[i], elts[i]};
+      }
+    } else {
+      for (size_t i = 0; i < std::min(nexprs, tuple_expr->exprs.size()); i++) {
+        exprs[i] = new plaidml_expr{tuple_expr->exprs[i]};
+      }
     }
   });
 }
@@ -446,8 +479,12 @@ plaidml_expr* plaidml_expr_str(  //
     const char* value) {
   return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_expr_str> " << value);
-    auto str_val = GlobalContext::get()->MakeStringOp(value);
-    return new plaidml_expr{std::make_shared<StringExpr>(value), str_val};
+    if (use_mlir()) {
+      auto str_val = GlobalContext::get()->MakeStringOp(value);
+      return new plaidml_expr{std::make_shared<StringExpr>(value), str_val};
+    } else {
+      return new plaidml_expr{std::make_shared<StringExpr>(value)};
+    }
   });
 }
 
@@ -473,8 +510,12 @@ plaidml_expr* plaidml_expr_int(  //
     int64_t value) {
   return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_expr_int> " << value);
-    auto const_val = GlobalContext::get()->MakeScalarConstantOp(value);
-    return new plaidml_expr{std::make_shared<IntConst>(value), const_val};
+    if (use_mlir()) {
+      auto const_val = GlobalContext::get()->MakeScalarConstantOp(value);
+      return new plaidml_expr{std::make_shared<IntConst>(value), const_val};
+    } else {
+      return new plaidml_expr{std::make_shared<IntConst>(value)};
+    }
   });
 }
 
@@ -500,8 +541,12 @@ plaidml_expr* plaidml_expr_float(  //
     double value) {
   return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_expr_float");
-    auto const_val = GlobalContext::get()->MakeScalarConstantOp(value);
-    return new plaidml_expr{std::make_shared<FloatConst>(value), const_val};
+    if (use_mlir()) {
+      auto const_val = GlobalContext::get()->MakeScalarConstantOp(value);
+      return new plaidml_expr{std::make_shared<FloatConst>(value), const_val};
+    } else {
+      return new plaidml_expr{std::make_shared<FloatConst>(value)};
+    }
   });
 }
 
@@ -531,7 +576,7 @@ plaidml_expr* plaidml_expr_call(  //
     // FIXME: has_exprs and has_values is a HACK to allow gradient callbacks
     // to work while the MLIR backend is under construction.
     bool has_exprs = true;
-    bool has_values = true;
+    bool has_values = use_mlir();
     for (size_t i = 0; i < nargs; i++) {
       if (!args[i]) {
         throw std::runtime_error(str(boost::format("Undefined tensor in call to %1%()") % fn));
@@ -559,6 +604,75 @@ plaidml_expr* plaidml_expr_call(  //
   });
 }
 
+plaidml_expr* plaidml_expr_grad_override(  //
+    plaidml_error* err,                    //
+    plaidml_deriv fn,                      //
+    void* user_ctx,                        //
+    size_t nins,                           //
+    plaidml_expr** ins,                    //
+    plaidml_expr* out) {
+  auto thunk = [](const ExprPtr& Y,                //
+                  const ExprPtr& dY,               //
+                  const std::vector<ExprPtr>& Xs,  //
+                  void* user_fn,                   //
+                  void* user_ctx) {
+    IVLOG(6, "plaidml_grad_override> thunk");
+    plaidml_deriv fn = reinterpret_cast<plaidml_deriv>(user_fn);
+    std::vector<plaidml_expr*> X_exprs(Xs.size());
+    std::vector<plaidml_expr*> dX_exprs(Xs.size());
+    // TODO: Construct the plaidml_exprs here w/ MLIR values too?
+    auto Y_expr = new plaidml_expr{Y};
+    auto dY_expr = new plaidml_expr{dY};
+    for (size_t i = 0; i < X_exprs.size(); i++) {
+      X_exprs[i] = new plaidml_expr{Xs[i]};
+    }
+    fn(user_ctx, Y_expr, dY_expr, X_exprs.size(), X_exprs.data(), dX_exprs.data());
+    std::vector<ExprPtr> ret(Xs.size());
+    for (size_t i = 0; i < ret.size(); i++) {
+      ret[i] = dX_exprs[i]->expr;
+      delete dX_exprs[i];
+    }
+    return ret;
+  };
+  return ffi_wrap<plaidml_expr*>(err, nullptr, [&] {
+    IVLOG(5, "plaidml_grad_override");
+    auto deriv_entry = std::make_shared<ExprDerivEntry>();
+    deriv_entry->fn = thunk;
+    deriv_entry->user_fn = reinterpret_cast<void*>(fn);
+    deriv_entry->user_ctx = user_ctx;
+    std::vector<ExprPtr> in_exprs(nins);
+    ExprPtr out_expr;
+    mlir::Value* out_value;
+    for (size_t i = 0; i < nins; i++) {
+      if (!ins[i]) {
+        throw std::runtime_error("Undefined input tensor in gradient override");
+      }
+      if (ins[i]->expr) {
+        in_exprs[i] = ins[i]->expr;
+      } else {
+        throw std::runtime_error("Currently exprs are required in plaidml_grad_override");  // TODO: MLIR
+      }
+    }
+    if (!out) {
+      throw std::runtime_error("Undefined output tensor in gradient override");
+    }
+    if (out->expr) {
+      out_expr = out->expr;
+    } else {
+      throw std::runtime_error("Currently out expr is required in plaidml_expr_grad_override");  // TODO: MLIR
+    }
+    if (out->value && use_mlir()) {
+      out_value = out->value;
+    } else {
+      out_value = nullptr;
+    }
+    ExprPtr expr = MakeGradOverride(deriv_entry, in_exprs, out_expr);
+    mlir::Value* value = use_mlir() ? GlobalContext::get()->MakePrimitiveOp("ident", out_value) : nullptr;
+    IVLOG(6, "The expr from plaidml_expr_grad_override has shape " << expr->shape.str());
+    return new plaidml_expr{expr, value};
+  });
+}
+
 plaidml_expr* plaidml_expr_index_map(  //
     plaidml_error* err,                //
     plaidml_expr* ref,                 //
@@ -570,15 +684,25 @@ plaidml_expr* plaidml_expr_index_map(  //
     std::vector<mlir::Value*> idx_values(ndims);
     for (size_t i = 0; i < ndims; i++) {
       idx_exprs[i] = raw_idxs[i]->expr;
-      idx_values[i] = raw_idxs[i]->value;
+      if (use_mlir()) {
+        idx_values[i] = raw_idxs[i]->value;
+      }
     }
     auto builder = GlobalContext::get();
     if (ref) {
-      auto value = builder->MakeAffineSourceIndexMapOp(ref->value, idx_values);
-      return new plaidml_expr{std::make_shared<IndexMapExpr>(ref->expr, idx_exprs), value};
+      if (use_mlir()) {
+        auto value = builder->MakeAffineSourceIndexMapOp(ref->value, idx_values);
+        return new plaidml_expr{std::make_shared<IndexMapExpr>(ref->expr, idx_exprs), value};
+      } else {
+        return new plaidml_expr{std::make_shared<IndexMapExpr>(ref->expr, idx_exprs)};
+      }
     }
-    auto value = builder->MakeAffineSinkIndexMapOp(idx_values);
-    return new plaidml_expr{std::make_shared<IndexMapExpr>(nullptr, idx_exprs), value};
+    if (use_mlir()) {
+      auto value = builder->MakeAffineSinkIndexMapOp(idx_values);
+      return new plaidml_expr{std::make_shared<IndexMapExpr>(nullptr, idx_exprs), value};
+    } else {
+      return new plaidml_expr{std::make_shared<IndexMapExpr>(nullptr, idx_exprs)};
+    }
   });
 }
 
@@ -592,10 +716,12 @@ plaidml_expr* plaidml_expr_size_map(  //
     std::vector<mlir::Value*> dim_values;
     for (size_t i = 0; i < ndims; i++) {
       dim_exprs.emplace_back(raw_dims[i]->expr);
-      dim_values.emplace_back(raw_dims[i]->value);
+      if (use_mlir()) {
+        dim_values.emplace_back(raw_dims[i]->value);
+      }
     }
     auto builder = GlobalContext::get();
-    auto value = builder->MakeAffineSizeMapOp(dim_values);
+    auto value = use_mlir() ? builder->MakeAffineSizeMapOp(dim_values) : nullptr;
     return new plaidml_expr{std::make_shared<SizeMapExpr>(dim_exprs), value};
   });
 }
@@ -631,142 +757,159 @@ plaidml_expr* plaidml_expr_contraction(  //
         throw std::runtime_error("oops: src_idxs");
       }
       expr->srcs.emplace_back(idxs);
-      src_values.emplace_back(raw_src_idxs[i]->value);
+      if (use_mlir()) {
+        src_values.emplace_back(raw_src_idxs[i]->value);
+      }
     }
     expr->ComputeShape(layout);
-    switch (agg_op) {
-      case PLAIDML_AGG_OP_SUM:
-        switch (combo_op) {
-          case PLAIDML_COMBO_OP_NONE: {
-            auto value = GlobalContext::get()->MakeConSumOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
+    if (use_mlir()) {
+      switch (agg_op) {
+        case PLAIDML_AGG_OP_SUM:
+          switch (combo_op) {
+            case PLAIDML_COMBO_OP_NONE: {
+              auto value = GlobalContext::get()->MakeConSumOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_ADD: {
+              auto value =
+                  GlobalContext::get()->MakeConSumAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_COND: {
+              auto value =
+                  GlobalContext::get()->MakeConSumCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_EQ: {
+              auto value =
+                  GlobalContext::get()->MakeConSumEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_MUL: {
+              auto value =
+                  GlobalContext::get()->MakeConSumMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
           }
-          case PLAIDML_COMBO_OP_ADD: {
-            auto value = GlobalContext::get()->MakeConSumAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
+          break;
+        case PLAIDML_AGG_OP_PROD:
+          switch (combo_op) {
+            case PLAIDML_COMBO_OP_NONE: {
+              auto value = GlobalContext::get()->MakeConProdOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_ADD: {
+              auto value =
+                  GlobalContext::get()->MakeConProdAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_COND: {
+              auto value =
+                  GlobalContext::get()->MakeConProdCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_EQ: {
+              auto value =
+                  GlobalContext::get()->MakeConProdEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_MUL: {
+              auto value =
+                  GlobalContext::get()->MakeConProdMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
           }
-          case PLAIDML_COMBO_OP_COND: {
-            auto value =
-                GlobalContext::get()->MakeConSumCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
+          break;
+        case PLAIDML_AGG_OP_MIN:
+          switch (combo_op) {
+            case PLAIDML_COMBO_OP_NONE: {
+              auto value = GlobalContext::get()->MakeConMinOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_ADD: {
+              auto value =
+                  GlobalContext::get()->MakeConMinAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_COND: {
+              auto value =
+                  GlobalContext::get()->MakeConMinCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_EQ: {
+              auto value =
+                  GlobalContext::get()->MakeConMinEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_MUL: {
+              auto value =
+                  GlobalContext::get()->MakeConMinMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
           }
-          case PLAIDML_COMBO_OP_EQ: {
-            auto value = GlobalContext::get()->MakeConSumEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
+          break;
+        case PLAIDML_AGG_OP_MAX:
+          switch (combo_op) {
+            case PLAIDML_COMBO_OP_NONE: {
+              auto value = GlobalContext::get()->MakeConMaxOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_ADD: {
+              auto value =
+                  GlobalContext::get()->MakeConMaxAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_COND: {
+              auto value =
+                  GlobalContext::get()->MakeConMaxCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_EQ: {
+              auto value =
+                  GlobalContext::get()->MakeConMaxEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_MUL: {
+              auto value =
+                  GlobalContext::get()->MakeConMaxMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
           }
-          case PLAIDML_COMBO_OP_MUL: {
-            auto value = GlobalContext::get()->MakeConSumMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
+          break;
+        case PLAIDML_AGG_OP_ASSIGN:
+          switch (combo_op) {
+            case PLAIDML_COMBO_OP_NONE: {
+              auto value =
+                  GlobalContext::get()->MakeConAssignOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_ADD: {
+              auto value =
+                  GlobalContext::get()->MakeConAssignAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_COND: {
+              auto value =
+                  GlobalContext::get()->MakeConAssignCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_EQ: {
+              auto value =
+                  GlobalContext::get()->MakeConAssignEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
+            case PLAIDML_COMBO_OP_MUL: {
+              auto value =
+                  GlobalContext::get()->MakeConAssignMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
+              return new plaidml_expr{expr, value};
+            }
           }
-        }
-        break;
-      case PLAIDML_AGG_OP_PROD:
-        switch (combo_op) {
-          case PLAIDML_COMBO_OP_NONE: {
-            auto value = GlobalContext::get()->MakeConProdOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_ADD: {
-            auto value =
-                GlobalContext::get()->MakeConProdAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_COND: {
-            auto value =
-                GlobalContext::get()->MakeConProdCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_EQ: {
-            auto value = GlobalContext::get()->MakeConProdEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_MUL: {
-            auto value =
-                GlobalContext::get()->MakeConProdMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-        }
-        break;
-      case PLAIDML_AGG_OP_MIN:
-        switch (combo_op) {
-          case PLAIDML_COMBO_OP_NONE: {
-            auto value = GlobalContext::get()->MakeConMinOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_ADD: {
-            auto value = GlobalContext::get()->MakeConMinAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_COND: {
-            auto value =
-                GlobalContext::get()->MakeConMinCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_EQ: {
-            auto value = GlobalContext::get()->MakeConMinEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_MUL: {
-            auto value = GlobalContext::get()->MakeConMinMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-        }
-        break;
-      case PLAIDML_AGG_OP_MAX:
-        switch (combo_op) {
-          case PLAIDML_COMBO_OP_NONE: {
-            auto value = GlobalContext::get()->MakeConMaxOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_ADD: {
-            auto value = GlobalContext::get()->MakeConMaxAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_COND: {
-            auto value =
-                GlobalContext::get()->MakeConMaxCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_EQ: {
-            auto value = GlobalContext::get()->MakeConMaxEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_MUL: {
-            auto value = GlobalContext::get()->MakeConMaxMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-        }
-        break;
-      case PLAIDML_AGG_OP_ASSIGN:
-        switch (combo_op) {
-          case PLAIDML_COMBO_OP_NONE: {
-            auto value = GlobalContext::get()->MakeConAssignOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_ADD: {
-            auto value =
-                GlobalContext::get()->MakeConAssignAddOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_COND: {
-            auto value =
-                GlobalContext::get()->MakeConAssignCondOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_EQ: {
-            auto value =
-                GlobalContext::get()->MakeConAssignEqOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-          case PLAIDML_COMBO_OP_MUL: {
-            auto value =
-                GlobalContext::get()->MakeConAssignMulOp(src_values, raw_sink_idxs->value, raw_sink_sizes->value);
-            return new plaidml_expr{expr, value};
-          }
-        }
-        break;
-      case PLAIDML_AGG_OP_NONE:
-        break;
+          break;
+        case PLAIDML_AGG_OP_NONE:
+          break;
+      }
+    } else {
+      return new plaidml_expr{expr};
     }
     throw std::runtime_error("Unsupported agg_op/combo_op");
   });
@@ -848,9 +991,15 @@ void plaidml_expr_gradient(  //
       wrt_values[i] = wrts[i]->value;
     }
     auto deriv_exprs = ComputeGradients(wrt_exprs, loss->expr);
-    auto deriv_values = GlobalContext::get()->ComputeGradients(wrt_values, loss->value);
-    for (size_t i = 0; i < nwrts; i++) {
-      derivs[i] = new plaidml_expr{deriv_exprs[i], deriv_values[i]};
+    if (use_mlir()) {
+      auto deriv_values = GlobalContext::get()->ComputeGradients(wrt_values, loss->value);
+      for (size_t i = 0; i < nwrts; i++) {
+        derivs[i] = new plaidml_expr{deriv_exprs[i], deriv_values[i]};
+      }
+    } else {
+      for (size_t i = 0; i < nwrts; i++) {
+        derivs[i] = new plaidml_expr{deriv_exprs[i]};
+      }
     }
   });
 }
@@ -914,7 +1063,11 @@ PLAIDML_EDSL_API plaidml_poly_expr* plaidml_poly_expr_dim(  //
     plaidml_dim_expr* expr) {
   return ffi_wrap<plaidml_poly_expr*>(err, nullptr, [&] {  //
     IVLOG(3, "plaidml_poly_expr_dim");
-    return new plaidml_poly_expr{std::make_shared<PolyDimExpr>(expr->expr), expr->value};
+    if (use_mlir()) {
+      return new plaidml_poly_expr{std::make_shared<PolyDimExpr>(expr->expr), expr->value};
+    } else {
+      return new plaidml_poly_expr{std::make_shared<PolyDimExpr>(expr->expr)};
+    }
   });
 }
 
@@ -923,8 +1076,12 @@ plaidml_poly_expr* plaidml_poly_expr_index(  //
     const char* name) {
   return ffi_wrap<plaidml_poly_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_poly_expr_index");
-    auto value = GlobalContext::get()->MakeAffineIndexOp(name);
-    return new plaidml_poly_expr{std::make_shared<PolyIndex>(next_idx_id++, std::string{name}), value};
+    if (use_mlir()) {
+      auto value = GlobalContext::get()->MakeAffineIndexOp(name);
+      return new plaidml_poly_expr{std::make_shared<PolyIndex>(next_idx_id++, std::string{name}), value};
+    } else {
+      return new plaidml_poly_expr{std::make_shared<PolyIndex>(next_idx_id++, std::string{name})};
+    }
   });
 }
 
@@ -933,8 +1090,12 @@ plaidml_poly_expr* plaidml_poly_expr_literal(  //
     int64_t value) {
   return ffi_wrap<plaidml_poly_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_poly_expr_literal> " << value);
-    auto mlir_value = GlobalContext::get()->MakeAffineConstantOp(value);
-    return new plaidml_poly_expr{std::make_shared<PolyLiteral>(value), mlir_value};
+    if (use_mlir()) {
+      auto mlir_value = GlobalContext::get()->MakeAffineConstantOp(value);
+      return new plaidml_poly_expr{std::make_shared<PolyLiteral>(value), mlir_value};
+    } else {
+      return new plaidml_poly_expr{std::make_shared<PolyLiteral>(value)};
+    }
   });
 }
 
@@ -952,8 +1113,12 @@ plaidml_poly_expr* plaidml_poly_expr_op(  //
       values[i] = args[i]->value;
       IVLOG(3, "  arg: " << values[i] << ": " << vec_args[i]->str());
     }
-    auto value = MakeAffineOp(op, values);
-    return new plaidml_poly_expr{MakeOp(static_cast<IntOp>(op), vec_args), value};
+    if (use_mlir()) {
+      auto value = MakeAffineOp(op, values);
+      return new plaidml_poly_expr{MakeOp(static_cast<IntOp>(op), vec_args), value};
+    } else {
+      return new plaidml_poly_expr{MakeOp(static_cast<IntOp>(op), vec_args)};
+    }
   });
 }
 
@@ -984,8 +1149,12 @@ plaidml_dim_expr* plaidml_dim_expr_none(  //
 ) {
   return ffi_wrap<plaidml_dim_expr*>(err, nullptr, [&] {  //
     IVLOG(3, "plaidml_dim_expr_none");
-    auto value = GlobalContext::get()->MakeNoneOp();
-    return new plaidml_dim_expr{std::make_shared<DimNoneExpr>(), value};
+    if (use_mlir()) {
+      auto value = GlobalContext::get()->MakeNoneOp();
+      return new plaidml_dim_expr{std::make_shared<DimNoneExpr>(), value};
+    } else {
+      return new plaidml_dim_expr{std::make_shared<DimNoneExpr>()};
+    }
   });
 }
 
@@ -1005,8 +1174,12 @@ plaidml_dim_expr* plaidml_dim_expr_int(  //
     int64_t value) {
   return ffi_wrap<plaidml_dim_expr*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_dim_expr_int> " << value);
-    auto mlir_value = GlobalContext::get()->MakeAffineConstantOp(value);
-    return new plaidml_dim_expr{std::make_shared<DimIntExpr>(value), mlir_value};
+    if (use_mlir()) {
+      auto mlir_value = GlobalContext::get()->MakeAffineConstantOp(value);
+      return new plaidml_dim_expr{std::make_shared<DimIntExpr>(value), mlir_value};
+    } else {
+      return new plaidml_dim_expr{std::make_shared<DimIntExpr>(value)};
+    }
   });
 }
 
@@ -1041,8 +1214,12 @@ plaidml_dim_expr* plaidml_dim_expr_op(  //
       values[i] = args[i]->value;
       IVLOG(3, "  arg: " << values[i] << ": " << vec_args[i]->str());
     }
-    auto value = MakeAffineOp(op, values);
-    return new plaidml_dim_expr{MakeOp(static_cast<IntOp>(op), vec_args), value};
+    if (use_mlir()) {
+      auto value = MakeAffineOp(op, values);
+      return new plaidml_dim_expr{MakeOp(static_cast<IntOp>(op), vec_args), value};
+    } else {
+      return new plaidml_dim_expr{MakeOp(static_cast<IntOp>(op), vec_args)};
+    }
   });
 }
 
@@ -1066,6 +1243,7 @@ plaidml_program* plaidml_program_evaluate(  //
     plaidml_expr** dst_updates) {
   return ffi_wrap<plaidml_program*>(err, nullptr, [&] {
     IVLOG(3, "plaidml_program_evaluate");
+    bool has_every_value = true;
     ProgramMutations mutations;
     std::vector<ExprPtr> outputs(noutputs);
     std::vector<mlir::Value*> values(noutputs);
@@ -1075,6 +1253,10 @@ plaidml_program* plaidml_program_evaluate(  //
       }
       mutations.outputs.emplace_back(raw_outputs[i]->expr);
       values[i] = raw_outputs[i]->value;
+      if (!values[i]) {
+        IVLOG(5, "Found a missing value! (index " << i << ")");
+        has_every_value = false;
+      }
     }
     std::vector<ProgramUpdate> updates(nupdates);
     for (size_t i = 0; i < nupdates; i++) {
@@ -1087,16 +1269,27 @@ plaidml_program* plaidml_program_evaluate(  //
       mutations.updates.emplace_back(ProgramUpdate{src_updates[i]->expr, dst_updates[i]->expr});
     }
     // TODO(MLIR): updates
-    std::vector<mlir::Value*> new_values(noutputs);
-    auto program = GlobalContext::get()->MakeProgram(name, values, new_values);
-    auto ret = new plaidml_program{Evaluate(name, mutations), program};
-    if (noutputs != ret->eval.outputs.size()) {
-      throw std::runtime_error("Internal error: noutputs != ret->eval.outputs.size()");
+    if (has_every_value && use_mlir()) {
+      std::vector<mlir::Value*> new_values(noutputs);
+      auto program = GlobalContext::get()->MakeProgram(name, values, new_values);
+      auto ret = new plaidml_program{Evaluate(name, mutations), program};
+      if (noutputs != ret->eval.outputs.size()) {
+        throw std::runtime_error("Internal error: noutputs != ret->eval.outputs.size()");
+      }
+      for (size_t i = 0; i < noutputs; i++) {
+        new_outputs[i] = new plaidml_expr{ret->eval.outputs[i], new_values[i]};
+      }
+      return ret;
+    } else {
+      auto ret = new plaidml_program{Evaluate(name, mutations)};
+      if (noutputs != ret->eval.outputs.size()) {
+        throw std::runtime_error("Internal error: noutputs != ret->eval.outputs.size()");
+      }
+      for (size_t i = 0; i < noutputs; i++) {
+        new_outputs[i] = new plaidml_expr{ret->eval.outputs[i]};
+      }
+      return ret;
     }
-    for (size_t i = 0; i < noutputs; i++) {
-      new_outputs[i] = new plaidml_expr{ret->eval.outputs[i], new_values[i]};
-    }
-    return ret;
   });
 }
 

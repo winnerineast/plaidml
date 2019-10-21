@@ -74,6 +74,7 @@ std::map<std::string, std::shared_ptr<BoundFunction>> DerivDefines = {
     {"as_float", ddef({"0", "0"})},
     {"as_int", ddef({"0", "0"})},
     {"as_uint", ddef({"0", "0"})},
+    {"as_bool", ddef({"0"})},
     {"bit_and", ddef({"0", "0"})},
     {"bit_or", ddef({"0", "0"})},
     {"bit_xor", ddef({"0", "0"})},
@@ -130,7 +131,7 @@ std::map<std::string, std::shared_ptr<BoundFunction>> DerivDefines = {
         DX2 = 0;
         DX3 = 0;
       } )***")},
-    {"builtin_binary_crossentropy", ddef({"(-X2/X1 + (1-X2)/(1-X1))/X3", "log(1-X1) - log(X1)", "0"})},
+    {"builtin_binary_crossentropy", ddef({"(-X2/X1 + (1-X2)/(1-X1))/X3", "(log(1-X1) - log(X1))/X3", "0"})},
     {"reverse_grad", std::make_shared<BoundFunction>(R"***(
       function (X1, X2, Y, DY) -> (DX1, DX2) {
         DX1 = -X2*DY;

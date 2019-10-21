@@ -234,7 +234,6 @@ class StripeGenerator {
     auto agg_op = GetAggOp(cion.agg_op);
     kernel->set_tag("contraction");
     kernel->set_tag("agg_op_" + agg_op);
-
     std::vector<std::string> scalar_inputs;
     kernel->name += "(";
     std::string out_ref_name = "";
@@ -311,25 +310,22 @@ class StripeGenerator {
 
     // Combination Op
     auto output_type = GetShape(op.output).type;
+    tile::DataType input_based_type = tile::DataType::INVALID;
+    for (const auto& input : op.inputs) {
+      auto input_type = GetShape(input).type;
+      input_based_type = CommonSupertype(input_type, input_based_type);
+    }
     if (scalar_inputs.size() > 1) {
       if (cion.comb_op == CombinationOp::COND) {
         kernel.get()->stmts.push_back(std::make_shared<Constant>("$ZERO", INT64_C(0)));
-
-        tile::DataType eq_type = tile::DataType::INVALID;
-        for (const auto& input : op.inputs) {
-          scalar_inputs.push_back(ScalarName(input));
-          auto input_type = GetShape(input).type;
-          eq_type = CommonSupertype(input_type, eq_type);
-        }
-
-        AddIntrinsic(kernel.get(), Intrinsic::EQ, eq_type, {scalar_inputs[0], scalar_inputs[1]}, {"$IS_EQ"});
+        AddIntrinsic(kernel.get(), Intrinsic::EQ, input_based_type, {scalar_inputs[0], scalar_inputs[1]}, {"$IS_EQ"});
         AddIntrinsic(kernel.get(), Intrinsic::COND, output_type, {"$IS_EQ", scalar_inputs[2], "$ZERO"},
                      {ScalarName(op.output)});
         kernel->set_tag("comb_op_cond");
       } else {
         auto combo_op = GetComboOp(cion.comb_op);
         if (!combo_op.empty()) {
-          AddIntrinsic(kernel.get(), combo_op, output_type, scalar_inputs, {ScalarName(op.output)});
+          AddIntrinsic(kernel.get(), combo_op, input_based_type, scalar_inputs, {ScalarName(op.output)});
           kernel->set_tag("comb_op_" + combo_op);
           if (agg_op == Intrinsic::SUM && combo_op == Intrinsic::MUL) {
             total_macs_ += kernel->idxs_product();
@@ -337,7 +333,7 @@ class StripeGenerator {
         }
       }
     } else {
-      AddIntrinsic(kernel.get(), "assign", output_type, scalar_inputs, {ScalarName(op.output)});
+      AddIntrinsic(kernel.get(), "assign", input_based_type, scalar_inputs, {ScalarName(op.output)});
       // Mark including the agg_op
       kernel->set_tag("agg_op_" + agg_op + "_no_comb_op");
     }
@@ -486,6 +482,14 @@ class StripeGenerator {
       auto input_type = GetShape(input).type;
       output_type = CommonSupertype(input_type, output_type);
     }
+
+    // Clean up the semantics of cond to be more strict at the Stripe level
+    if (op.f.fn == "cond" && GetShape(op.inputs[0]).type != tile::DataType::BOOLEAN) {
+      std::string oname = ScalarName(op.inputs[0] + "_cast");
+      AddIntrinsic(kernel.get(), "as_bool", tile::DataType::BOOLEAN, {scalar_inputs[0]}, {oname});
+      scalar_inputs[0] = oname;
+    }
+
     AddIntrinsic(  //
         kernel.get(), op.f.fn, output_type, scalar_inputs, {ScalarName(op.output)});
 

@@ -9,21 +9,43 @@ load(
     "plaidml_cc_test",
 )
 
+MLIR_TBLGEN_ALSO = [
+    "//pmlc/util:interfaces.td",
+    "interfaces.td",
+    "predicates.td",
+]
+
 mlir_tblgen(
     name = "gen-op-decls",
     src = "ops.td",
     out = "ops.h.inc",
     action = "-gen-op-decls",
-    also = ["predicates.td"],
+    also = MLIR_TBLGEN_ALSO,
     incs = ["@mlir//:include"],
 )
 
 mlir_tblgen(
     name = "gen-op-defs",
     src = "ops.td",
-    out = "ops.cpp.inc",
+    out = "ops.cc.inc",
     action = "-gen-op-defs",
-    also = ["predicates.td"],
+    also = MLIR_TBLGEN_ALSO,
+    incs = ["@mlir//:include"],
+)
+
+mlir_tblgen(
+    name = "gen-op-interface-decls",
+    src = "interfaces.td",
+    out = "interfaces.h.inc",
+    action = "-gen-op-interface-decls",
+    incs = ["@mlir//:include"],
+)
+
+mlir_tblgen(
+    name = "gen-op-interface-defs",
+    src = "interfaces.td",
+    out = "interfaces.cc.inc",
+    action = "-gen-op-interface-defs",
     incs = ["@mlir//:include"],
 )
 
@@ -31,12 +53,14 @@ plaidml_cc_library(
     name = "eltwise",
     srcs = [
         "dialect.cc",
+        "interfaces.cc.inc",
         "ops.cc",
-        "ops.cpp.inc",
+        "ops.cc.inc",
         "util.cc",
     ],
     hdrs = [
         "dialect.h",
+        "interfaces.h.inc",
         "ops.h",
         "ops.h.inc",
         "types.h",
@@ -47,6 +71,7 @@ plaidml_cc_library(
     deps = [
         ":gen-op-decls",
         ":gen-op-defs",
+        "//pmlc/util",
         "//tile/base",
         "@llvm//:support",
         "@mlir//:IR",

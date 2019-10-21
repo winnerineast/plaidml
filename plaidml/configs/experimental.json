@@ -3,30 +3,6 @@
     "@type": "type.vertex.ai/vertexai.tile.local_machine.proto.Platform",
     "hardware_configs": [
       {
-        "description": "CPU (via LLVM) settings",
-        "sel": {
-          "and": {
-            "sel": [
-              {
-                "name_regex": "LLVM CPU"
-              },
-              {
-                "vendor_regex": "LLVM"
-              }
-            ]
-          }
-        },
-        "settings": {
-          "vec_size": 32,
-          "mem_width": 4096,
-          "use_global": true,
-          "max_regs": 8192,
-          "max_mem": 8192,
-          "goal_flops_per_byte": 20,
-          "stripe_config": "cpu"
-        }
-      },
-      {
         "description": "AMD config",
         "sel": {
           "or": {
@@ -85,7 +61,8 @@
           "goal_groups": 1,
           "goal_flops_per_byte": 50,
           "disable_mad": true,
-          "stripe_config": "intel_gen9_opencl"
+          "stripe_config": "intel_gen9_opencl",
+          "use_stripe": true
         }
       },
       {
@@ -104,7 +81,7 @@
           "use_global": true
         }
       },
-     {
+      {
         "description": "Intel GPU config (CM)",
         "sel": {
           "name_regex": "CM.*"
@@ -120,7 +97,7 @@
           "disable_mad": true,
           "stripe_config": "cm"
         }
-      }, 
+      },
       {
         "description": "NVIDIA config",
         "sel": {
@@ -138,7 +115,7 @@
         }
       },
       {
-        "description": "Intel CPU config",
+        "description": "Intel OpenCL CPU config",
         "sel": {
           "and": {
             "sel": [
@@ -157,7 +134,7 @@
           "mem_width": 64,
           "max_mem": 32768,
           "max_regs": 32768,
-          "stripe_config": "cpu"
+          "stripe_config": "opencl_cpu"
         }
       },
       {

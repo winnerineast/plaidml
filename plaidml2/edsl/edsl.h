@@ -24,6 +24,11 @@ class TensorDim;
 class TensorIndex;
 class Value;
 
+using TensorDeriv = std::vector<Tensor> (*)(  //
+    const Tensor& Y,                          //
+    const Tensor& dY,                         //
+    const std::vector<Tensor>& Xs);
+
 namespace details {
 
 template <typename T>
@@ -565,6 +570,39 @@ inline Tensor Placeholder(             //
   return Placeholder(shape, name);
 }
 
+inline plaidml_deriv ThunkTensorDeriv(TensorDeriv fn) {
+  return [](void* user_ctx,          //
+            plaidml_expr* Y_expr,    //
+            plaidml_expr* dY_expr,   //
+            size_t nXs,              //
+            plaidml_expr** X_exprs,  //
+            plaidml_expr** dX_exprs) {
+    auto fn = reinterpret_cast<TensorDeriv>(user_ctx);
+    Tensor Y(Y_expr);
+    Tensor dY(dY_expr);
+    std::vector<Tensor> Xs(nXs);
+    for (size_t i = 0; i < Xs.size(); i++) {
+      Xs[i] = Tensor(X_exprs[i]);
+    }
+    auto dXs = fn(Y, dY, Xs);
+    for (size_t i = 0; i < Xs.size(); i++) {
+      dX_exprs[i] = ffi::call<plaidml_expr*>(plaidml_expr_clone, dXs[i].as_ptr());
+    }
+  };
+}
+
+inline Tensor OverrideGrads(TensorDeriv fn, const std::vector<Tensor>& ins, const Tensor& out) {
+  auto thunk = ThunkTensorDeriv(fn);
+  auto nins = ins.size();
+  std::vector<plaidml_expr*> in_ptrs(nins);
+  for (size_t i = 0; i < ins.size(); i++) {
+    in_ptrs[i] = ins[i].as_ptr();
+  }
+  auto ptr = ffi::call<plaidml_expr*>(plaidml_expr_grad_override, thunk, reinterpret_cast<void*>(fn), nins,
+                                      in_ptrs.data(), out.as_ptr());
+  return Tensor(ptr);
+}
+
 Tensor Call(const std::string& fn, const std::vector<Tensor>& args);
 
 template <typename... Ts>
@@ -582,6 +620,8 @@ inline Tensor as_int(const Tensor& x, size_t bit_size) { return Call("as_int", x
 
 inline Tensor as_uint(const Tensor& x, size_t bit_size) { return Call("as_uint", x, static_cast<int64_t>(bit_size)); }
 
+inline Tensor as_bool(const Tensor& x) { return Call("as_bool", x); }
+
 inline Tensor cos(const Tensor& x) { return Call("cos", x); }
 
 inline Tensor cosh(const Tensor& x) { return Call("cosh", x); }
@@ -589,6 +629,8 @@ inline Tensor cosh(const Tensor& x) { return Call("cosh", x); }
 inline Tensor exp(const Tensor& x) { return Call("exp", x); }
 
 inline Tensor gather(const Tensor& x, const Tensor& y) { return Call("gather", x, y); }
+
+inline Tensor ident(const Tensor& x) { return Call("ident", x); }
 
 inline Tensor index(const Tensor& x, size_t axis) { return Call("index", x, static_cast<int64_t>(axis)); }
 
@@ -631,8 +673,6 @@ inline Tensor select(const Tensor& cond, const Tensor& true_case, const Tensor& 
 }
 
 inline Tensor shape(const Tensor& x) { return Call("shape", x); }
-
-inline Tensor sigmoid(const Tensor& x) { return Call("sigmoid", x); }
 
 inline Tensor sin(const Tensor& x) { return Call("sin", x); }
 
@@ -726,6 +766,14 @@ PLAIDML_EDSL_DEFINE_TENSOR_IDXDIM_BINARY_OPS(+, PLAIDML_INT_OP_ADD, "add");
 PLAIDML_EDSL_DEFINE_TENSOR_IDXDIM_BINARY_OPS(-, PLAIDML_INT_OP_SUB, "sub");
 PLAIDML_EDSL_DEFINE_TENSOR_IDXDIM_BINARY_OPS(*, PLAIDML_INT_OP_MUL, "mul");
 PLAIDML_EDSL_DEFINE_TENSOR_IDXDIM_BINARY_OPS(/, PLAIDML_INT_OP_DIV, "div");
+
+#define PLAIDML_EDSL_DEFINE_TENSOR_DIM_BINARY_FN(_fn_, _int_op_)                                                  \
+  inline TensorDim _fn_(const TensorDim& lhs, const TensorDim& rhs) { return TensorDim{_int_op_, {lhs, rhs}}; }   \
+  inline TensorDim _fn_(int64_t lhs, const TensorDim& rhs) { return TensorDim{_int_op_, {TensorDim{lhs}, rhs}}; } \
+  inline TensorDim _fn_(const TensorDim& lhs, int64_t rhs) { return TensorDim{_int_op_, {lhs, TensorDim{rhs}}}; }
+
+PLAIDML_EDSL_DEFINE_TENSOR_DIM_BINARY_FN(max, PLAIDML_INT_OP_MAX);
+PLAIDML_EDSL_DEFINE_TENSOR_DIM_BINARY_FN(min, PLAIDML_INT_OP_MIN);
 
 inline Tensor Tensor::operator-() const { return Call("neg", {*this}); }
 inline Tensor Tensor::operator~() const { return Call("bit_not", {*this}); }

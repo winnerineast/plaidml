@@ -7,14 +7,16 @@ import operator
 import os
 import sys
 import unittest
+import warnings
 from collections import OrderedDict
 
-# Make sure we win the race with TF to load libstdc++...
-import plaidml2
-from plaidml2.ffi import Error as pml2_ffi_Error
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import numpy as np
 import numpy.testing as npt
+
+# Make sure we win the race with TF to load libstdc++...
+import plaidml2
 # Tensorflow needs some code called directly
 import tensorflow
 # Theano breaks on convolution if given a default optimizer
@@ -23,16 +25,12 @@ from keras.backend import floatx
 from keras.backend import tensorflow_backend as tf
 from keras.backend import theano_backend as th
 from plaidml2.bridge import keras as pkb
-from plaidml2 import edsl as edsl
+
+# Removes (almost) all tensorflow deprecation warnings
+tensorflow.compat.v1.logging.set_verbosity(tensorflow.compat.v1.logging.ERROR)
 
 theano.config.optimizer = "None"
 logger = logging.getLogger(__name__)
-
-if os.getenv('PLAIDML_VERBOSE'):
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
 
 # We have to set_floatx before the interpreter encounters any of the test
 # functions, because it will execute the 'opTest' decorator as it processes
@@ -43,6 +41,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('-v', '--verbose', action='count', default=0)
+    parser.add_argument('--shard', type=int, default=0, help='Which shard to run')
+    parser.add_argument('--shard-count',
+                        type=int,
+                        default=0,
+                        help='Run sharded test split into this many shards. ' +
+                        'Does not forward additional arguments to unittest. ' +
+                        '0 (default) to not shard.')
     args, remainder = parser.parse_known_args()
 
     # plaidml._internal_set_vlog(args.verbose)
@@ -241,7 +246,6 @@ def opTest(in_data,
                     results.append((fr, gr))
                 else:
                     results.append((fr,))
-        tf_session.close()
         return results
 
     def apply(test_func):
@@ -322,6 +326,18 @@ class TestBackendOps(unittest.TestCase):
         assert isinstance(pkb.learning_phase(), int)
         npt.assert_equal(pkb.learning_phase(), 0)
 
+    def testReverseGradient(self):
+        x = m(2, 2, 3) + 3.
+        pl = pkb.placeholder(shape=x.shape)
+        y = pkb.reverse_gradient(pl)
+        z = pkb.sqrt(y) + pl
+        df = pkb.gradients(pkb.mean(z), [pl])
+        gfn = pkb.function([pl], df, updates=[])
+        gr = gfn([x])
+        npt.assert_allclose(gr[0], (1. / x.size) * (-1. / (2 * np.sqrt(x)) + 1.),
+                            rtol=DEFAULT_TOL,
+                            atol=DEFAULT_ATOL)
+
     @opTest([
         # Don't use exactly 0 (inconsistent gradient behavior between frameworks at ReLU cusp)
         [
@@ -339,7 +355,7 @@ class TestBackendOps(unittest.TestCase):
             True,
         ],
     ])
-    @unittest.skipIf(os.environ.get("USE_STRIPE", "0") == "1", "Stripe does not work for RNNs")
+    @unittest.skip("Unknown instability issues")
     def testRNN(self, b, inp, init_state, ker, r_ker, go_back):
 
         def step_function(inputs, states):
@@ -756,7 +772,12 @@ class TestBackendOps(unittest.TestCase):
     def testSqrt(self, b, x):
         return [b.sqrt(x)]
 
-    @opTest([[m(1, 2, 1)], [np.sqrt(m(5, 5, 10) + 2) - 3], [np.sin(m(4, 3, 2, 1, 6))]],
+    @opTest([
+        [np.log(m(2, 4) + 1.5)],
+        [m(1, 2, 1)],
+        [np.sqrt(m(5, 5, 10) + 2) - 3],
+        [np.sin(m(4, 3, 2, 1, 6))],
+    ],
             1e-02,
             skip_theano=True)
     def testSoftmax(self, b, x):
@@ -764,6 +785,14 @@ class TestBackendOps(unittest.TestCase):
             -b.log(b.softmax(x)),
             -b.log(b.softmax(x, axis=-1)),
             -b.log(b.softmax(x, axis=1)),
+        ]
+
+    @opTest([[m(1, 3, 2)]])
+    def testBranchWithSoftmax(self, b, x):
+        return [
+            b.softmax(x) + b.mean(x),
+            b.log(b.softmax(x)) + b.log(b.mean(x)),
+            b.softmax(x, axis=1) * b.mean(x, axis=1, keepdims=True),
         ]
 
     @opTest([[m(1, 3, 4)], [m(7, 19) - 10.]])
@@ -783,14 +812,18 @@ class TestBackendOps(unittest.TestCase):
     def testSigmoid(self, b, x):
         return [b.sigmoid(x)]
 
-    @opTest([[m(2, 2)]], skip_theano=True)
-    def testBinaryCrossentropy(self, b, x):
+    @opTest([
+        [np.array([[0, 1], [1, 0]]), m(2, 2)],
+        [np.array([[0.3, 0.7], [0.1, 0.9]]), m(2, 2)],
+        [np.array([[0, 0.7], [1, .3]]), m(2, 2)],
+    ],
+            skip_theano=True,
+            atol=1e-7)
+    def testBinaryCrossentropy(self, b, x, y):
         return [
-            b.binary_crossentropy(b.variable(np.array([[0, 1], [1, 0]])), x, from_logits=True),
-            b.binary_crossentropy(b.variable(np.array([[0.3, 0.7], [0.1, 0.9]])),
-                                  x,
-                                  from_logits=False),
-            b.binary_crossentropy(b.variable(np.array([[0, 0.7], [1, .3]])), b.sigmoid(x))
+            b.binary_crossentropy(x, y, from_logits=True),
+            b.binary_crossentropy(x, y, from_logits=False),
+            b.binary_crossentropy(x, b.sigmoid(y))
         ]
 
     @opTest([[np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]]), (m(3, 3) + 3) / 15.0],
@@ -961,6 +994,7 @@ class TestBackendOps(unittest.TestCase):
 
     # Asymmetric stride examples not included for separable convolutions b/c they
     # aren't implemented in tensorflow (and theano doesn't do separable convs)
+    @unittest.skip("Broken on some drivers. TODO: periodically check if this is resolved")
     @opTest(
         [
             _separable_conv_inp(IN=1, IC=2, OC=6, CM=3, IS=[8, 8], KS=[3, 3]),
@@ -1179,12 +1213,12 @@ class TestBackendOps(unittest.TestCase):
         output = pkb.reshape(a, (0, 0, 0))
         self.assertEqual(str(output)[:len('reshape/')], 'reshape/')
         self.assertEqual(str(output)[-len('|fp32(1, 1, 60)'):], '|fp32(1, 1, 60)')
-        #throw runtime exceptions
+        # expect runtime exceptions
         with self.assertRaises(plaidml2.Error) as cm:
-            output = pkb.reshape(a, (-1, -1))
+            pkb.reshape(a, (-1, -1))
         self.assertTrue("at most one dimension's size may be inferred" in str(cm.exception))
         with self.assertRaises(plaidml2.Error) as cm:
-            output = pkb.reshape(a, (1, 1, 1, 0))
+            pkb.reshape(a, (1, 1, 1, 0))
         self.assertTrue(
             "matching dimension requested at 4 from 3-dimensional tensor" in str(cm.exception))
 
@@ -1253,6 +1287,14 @@ class TestBackendOps(unittest.TestCase):
         a = b.constant(5, shape=(10,))
         return a
 
+    def testIsPlaceholder(self):
+        x = pkb.placeholder((4, 3))
+        self.assertTrue(pkb.is_placeholder(x))
+        y = pkb.variable(m(2, 2))
+        self.assertFalse(pkb.is_placeholder(y))
+        z = pkb.exp(x)
+        self.assertFalse(pkb.is_placeholder(z))
+
     # Note: we skip tensorflow since init_global must be called in the middle of this function
     # for correct semantics, and Theano is sufficient.
     @compareForwardExact(skip_tensorflow=True)
@@ -1312,8 +1354,13 @@ class TestBackendOps(unittest.TestCase):
     def testNormalizeBatchInTrainingSimple(self, b, x, mov_avg, mov_var):
         return [(b.normalize_batch_in_training(x, mov_avg, mov_var, [2]))[0]]
 
-    @opTest([[n(2, 3), np.array([3., 4., .7]),
-              np.array([1.44, .99, .98])]],
+    @opTest([
+        [n(2, 3), np.array([3., 4., .7]),
+         np.array([1.44, .99, .98])],
+        [n(3, 2), None, None],
+        [n(1, 3), None, np.array([2., 3., .55])],
+        [n(1, 2), np.array([-2., 0.]), None],
+    ],
             skip_theano=True,
             skip_tensorflow=True)
     def testNormalizeBatchInTraining(self, b, x, beta, gamma):
@@ -1330,10 +1377,11 @@ class TestBackendOps(unittest.TestCase):
 
     @compareForwardClose()
     def testNormalizeBatchInTrainingWeirdMultiAxis(self, b):
+        # These shapes are pretty much nonsense, but TF figures it out (via reshape) so we should too
         return b.normalize_batch_in_training(
             b.variable(n(2, 3, 5, 7)),
-            b.constant(11, shape=(1, 3, 1, 1)),
-            b.constant(0, shape=(1, 3, 1, 1)),
+            b.constant(11, shape=(3, 1, 1, 1, 1, 1, 1, 1)),
+            b.constant(0, shape=(3, 1)),
             [0, 2, 3],
         )[2]
 
@@ -1599,11 +1647,11 @@ class TestBackendOps(unittest.TestCase):
         A = pkb.variable(m(2, 3, 1))
         B = pkb.variable(m(1, 2, 1))
         C = pkb.variable(m(2, 2, 2, 1))
-        with self.assertRaises(pml2_ffi_Error):
+        with self.assertRaises(plaidml2.Error):
             pkb.conv(A, C)
-        with self.assertRaises(pml2_ffi_Error):
+        with self.assertRaises(plaidml2.Error):
             pkb.conv(A, B, strides=(2, 3))
-        with self.assertRaises(pml2_ffi_Error):
+        with self.assertRaises(plaidml2.Error):
             pkb.conv(A, B, dilation_rate=(1, 1))
 
     @compareForwardExact()
@@ -1711,6 +1759,39 @@ class TestBackendOps(unittest.TestCase):
     def bigMatMul(self, b, A, B):
         return [b.dot(A, B)]
 
+    def testDupOutputs(self):
+
+        def model(b):
+            A = b.variable(m(10, 20), name='A')
+            B = b.variable(m(20, 30), name='B')
+            C = b.dot(A, B)
+            fn = b.function([], [C, C, C])
+            return fn([])
+
+        tf_session = tensorflow.Session()
+        tf.set_session(tf_session)
+        tensorflow_result = model(tf)
+        plaidml_result = model(pkb)
+
+        for result in zip(plaidml_result, tensorflow_result):
+            npt.assert_allclose(result[0],
+                                result[1],
+                                rtol=DEFAULT_TOL,
+                                atol=DEFAULT_ATOL,
+                                err_msg='x=plaidml, y=tensorflow')
+
 
 if __name__ == '__main__':
-    unittest.main(argv=sys.argv[:1] + remainder, verbosity=args.verbose + 1)
+    np.set_printoptions(threshold=np.inf)
+    if args.shard_count:
+        print('Running shard {} of {}'.format(args.shard, args.shard_count))
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        for test_num, test in enumerate(loader.loadTestsFromTestCase(TestBackendOps)):
+            if test_num % args.shard_count == args.shard:
+                print("test_num: {}, test: {}".format(test_num, test))
+                suite.addTest(test)
+        runner = unittest.TextTestRunner()
+        exit(not runner.run(suite).wasSuccessful())
+    else:
+        unittest.main(argv=sys.argv[:1] + remainder, verbosity=args.verbose + 1)

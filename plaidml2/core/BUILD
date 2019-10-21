@@ -10,17 +10,25 @@ load(
     "plaidml_py_version",
 )
 
+SDK_HDRS = [
+    "core.h",
+    "ffi.h",
+]
+
 exports_files([
     "ffi.h",
 ])
 
 pkg_tar(
     name = "include_pkg",
+    srcs = SDK_HDRS,
     package_dir = "include/plaidml2/core",
-    srcs = [
-        "core.h",
-        "ffi.h",
-    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "sdk",
+    srcs = SDK_HDRS,
     visibility = ["//visibility:public"],
 )
 
@@ -43,21 +51,16 @@ plaidml_cc_library(
         "settings.h",
         ":cc_version",
     ],
-    hdrs = [
-        "core.h",
-        "ffi.h",
-    ],
+    hdrs = SDK_HDRS,
     defines = ["PLAIDML_CORE_DLL"],
     visibility = ["//visibility:public"],
     deps = [
         "//base/util",
         "//pmlc/dialect/tile",
-        "//tile/hal/cpu",
         "//tile/hal/opencl",
         "//tile/lang",
         "//tile/lang/ast",
         "//tile/platform/local_machine",
-        "//tile/platform/stripejit",
         "//tile/targets",
         "@boost//:filesystem",
     ] + select({
@@ -66,14 +69,12 @@ plaidml_cc_library(
         ],
         "//conditions:default": [],
     }),
+    alwayslink = 1,
 )
 
 plaidml_cc_library(
     name = "api",
-    hdrs = [
-        "core.h",
-        "ffi.h",
-    ],
+    hdrs = SDK_HDRS,
     visibility = ["//visibility:public"],
 )
 

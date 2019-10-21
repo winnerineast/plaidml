@@ -10,20 +10,10 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Function.h"
 #include "mlir/IR/Matchers.h"
-#include "mlir/IR/Operation.h"
 #include "mlir/IR/StandardTypes.h"
 #include "mlir/Support/DebugStringHelper.h"
 
 #include "base/util/logging.h"
-
-namespace mlir {
-
-std::ostream& operator<<(std::ostream& os, mlir::ModuleOp op) {
-  os << mlir::debugString(op);
-  return os;
-}
-
-}  // namespace mlir
 
 namespace pmlc {
 namespace dialect {
@@ -47,8 +37,8 @@ namespace {
 
 bool MergeTypes(Type* into, Type from, DataType dtype) {
   IVLOG(6, "MergeTypes> " << mlir::debugString(*into) << ", " << mlir::debugString(from));
-  auto intoShapedType = GetTensorType(*into);
-  auto fromShapedType = GetTensorType(from);
+  auto intoShapedType = getRankedTensorType(*into);
+  auto fromShapedType = getRankedTensorType(from);
 
   // To compute the result broadcasted shape, we compare operand shapes
   // element-wise: starting with the trailing dimensions, and working the
@@ -117,7 +107,7 @@ bool MergeTypes(Type* into, Type from, DataType dtype) {
 
 }  // namespace
 
-mlir::RankedTensorType GetTensorType(mlir::Type type) {
+mlir::RankedTensorType getRankedTensorType(mlir::Type type) {
   if (auto rankedType = type.dyn_cast<mlir::RankedTensorType>()) {
     return rankedType;
   }
@@ -161,21 +151,6 @@ Type ComputeResultType(ArrayRef<Value*> operands, DataType override) {
     }
   }
   return ret;
-}
-
-void UpdateFuncOpType(Operation* op) {
-  auto funcOp = llvm::dyn_cast<FuncOp>(op->getParentOp());
-  if (funcOp) {
-    auto retOp = &funcOp.getOperation()->getRegion(0).front().back();
-    auto funcType = funcOp.getType();
-    if (funcType.getNumResults() == retOp->getNumOperands()) {
-      SmallVector<Type, 4> retTypes(retOp->getOperandTypes());
-      auto newType = FunctionType::get(funcType.getInputs(), retTypes, funcOp.getContext());
-      if (funcType != newType) {
-        funcOp.setType(newType);
-      }
-    }
-  }
 }
 
 SmallVector<int64_t, 4> ComputeShape(ArrayRef<Value*> operands) {
@@ -229,14 +204,20 @@ bool ConstantValueMatcher::match(mlir::Operation* op) {
     return false;
   }
   auto type = op->getResult(0)->getType();
-  if (type.isa<ScalarType>()) {
-    if (auto intAttr = attr.dyn_cast<IntegerAttr>()) {
-      return intAttr.getValue() == value;
+  if (auto tensorType = type.dyn_cast<RankedTensorType>()) {
+    if (!tensorType.getElementType().isa<ScalarType>() || tensorType.getRank() != 0) {
+      return false;
     }
-    if (auto floatAttr = attr.dyn_cast<FloatAttr>()) {
-      return floatAttr.getValueAsDouble() == value;
-    }
+  } else if (!type.isa<ScalarType>()) {
+    return false;
   }
+  if (auto intAttr = attr.dyn_cast<IntegerAttr>()) {
+    return intAttr.getValue() == value;
+  }
+  if (auto floatAttr = attr.dyn_cast<FloatAttr>()) {
+    return floatAttr.getValueAsDouble() == value;
+  }
+
   return false;
 }
 

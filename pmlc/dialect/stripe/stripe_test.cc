@@ -27,6 +27,7 @@
 
 using namespace vertexai::tile;         // NOLINT
 using namespace pmlc::dialect::stripe;  // NOLINT
+using namespace plaidml::edsl;          // NOLINT
 
 using ::testing::LinesEq;
 
@@ -42,50 +43,48 @@ class Environment : public ::testing::Environment {
   return 0;
 }();
 
-lang::RunInfo example() {
-  using plaidml::edsl::LogicalShape;
-  using vertexai::tile::lib::LoadConv2dBnRelu;
-  LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
-  LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
-  LogicalShape C(PLAIDML_DATA_FLOAT32, {128});
-  return LoadConv2dBnRelu("foo", I, K, C, {16, 112, 112, 128});
-}
-
 template <typename Pass, typename Config>
-std::unique_ptr<mlir::FunctionPassBase> CreatePass(Config config) {
+std::unique_ptr<mlir::Pass> CreatePass(Config config) {
   return std::make_unique<Pass>(config);
 }
 
-TEST(Stripe, Transcode) {
+// Stripe Classic <-> Stripe MLIR transcoding tests are parameterized by whether they should add location info
+// or not, since there've been some subtle transcoding issues when location-adding top-level refinements are
+// or aren't in place.
+class TranscodeTest : public ::testing::TestWithParam<bool> {};
+
+static void RunTest(const lang::RunInfo& ri, bool addLocations) {
   IVLOG(1, "Making context + module");
   mlir::MLIRContext context;
 
   IVLOG(1, "Making a stripe program + fixing locals");
-  auto prog = lang::GenerateStripe(example());
+  auto prog = lang::GenerateStripe(ri);
   codegen::LocalizeBlockPass(codegen::AliasMap(codegen::AliasMap(), prog->entry.get()), prog->entry.get(), {"tmp"});
 
-  codegen::CompilerState cstate{prog};
+  if (addLocations) {
+    codegen::CompilerState cstate{prog};
 
-  IVLOG(1, "Adding a memory location");
-  codegen::proto::LocateMemoryPass lmp;
-  auto lmp_dev = lmp.mutable_loc()->add_devs();
-  lmp_dev->set_name("OuterMem");
-  lmp_dev->add_units()->set_offset(0);
-  lmp_dev = lmp.mutable_loc()->add_devs();
-  lmp_dev->set_name("InnerMem");
-  lmp_dev->add_units()->set_offset(1);
-  codegen::LocateMemoryPass{lmp}.Apply(&cstate);
+    IVLOG(1, "Adding a memory location");
+    codegen::proto::LocateMemoryPass lmp;
+    auto lmp_dev = lmp.mutable_loc()->add_devs();
+    lmp_dev->set_name("OuterMem");
+    lmp_dev->add_units()->set_offset(0);
+    lmp_dev = lmp.mutable_loc()->add_devs();
+    lmp_dev->set_name("InnerMem");
+    lmp_dev->add_units()->set_offset(1);
+    codegen::LocateMemoryPass{lmp}.Apply(&cstate);
 
-  IVLOG(1, "Adding an executor location");
-  codegen::proto::LocateBlockPass lbp;
-  lbp.add_reqs("main");
-  auto lbp_dev = lbp.mutable_loc()->add_devs();
-  lbp_dev->set_name("OuterExecutor");
-  lbp_dev->add_units()->set_offset(0);
-  lbp_dev = lbp.mutable_loc()->add_devs();
-  lbp_dev->set_name("InnerExecutor");
-  lbp_dev->add_units()->set_offset(1);
-  codegen::LocateBlockPass{lbp}.Apply(&cstate);
+    IVLOG(1, "Adding an executor location");
+    codegen::proto::LocateBlockPass lbp;
+    lbp.add_reqs("main");
+    auto lbp_dev = lbp.mutable_loc()->add_devs();
+    lbp_dev->set_name("OuterExecutor");
+    lbp_dev->add_units()->set_offset(0);
+    lbp_dev = lbp.mutable_loc()->add_devs();
+    lbp_dev->set_name("InnerExecutor");
+    lbp_dev->add_units()->set_offset(1);
+    codegen::LocateBlockPass{lbp}.Apply(&cstate);
+  }
 
   IVLOG(2, "Original version:");
   IVLOG(2, *prog->entry);
@@ -100,7 +99,7 @@ TEST(Stripe, Transcode) {
   }
 
   IVLOG(1, "Doing some passes");
-  mlir::PassManager pm(true);
+  mlir::PassManager pm(&context, true);
   pm.addPass(mlir::createCSEPass());
   codegen::proto::MLIR_PadPass options;
   pm.addPass(CreatePass<PaddingPass>(options));
@@ -109,12 +108,19 @@ TEST(Stripe, Transcode) {
     throw std::runtime_error("MLIR passes failure");
   }
 
-  IVLOG(2, "Dumping module");
+  IVLOG(1, "Writing out module");
   auto moduleOp = *module;
-  IVLOG(2, mlir::debugString(moduleOp));
+  auto module_str = mlir::debugString(moduleOp);
+  IVLOG(2, module_str);
+
+  IVLOG(1, "Parsing it back in");
+  auto new_module = parseSourceString(module_str, &context);
+  if (!new_module) {
+    throw std::runtime_error("Unable to parse");
+  }
 
   IVLOG(1, "Converting the other way");
-  auto prog2 = FromMLIR(*module);
+  auto prog2 = FromMLIR(*new_module);
 
   IVLOG(2, "New version:");
   IVLOG(2, *prog2->entry);
@@ -122,3 +128,47 @@ TEST(Stripe, Transcode) {
   // require textually perfect round trip
   EXPECT_THAT(to_string(*prog2->entry), LinesEq(to_string(*prog->entry)));
 }
+
+TEST_P(TranscodeTest, Conv2dBnRelu) {
+  using plaidml::edsl::LogicalShape;
+  LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
+  LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
+  LogicalShape C(PLAIDML_DATA_FLOAT32, {128});
+  using vertexai::tile::lib::LoadConv2dBnRelu;
+  auto ri = LoadConv2dBnRelu("foo", I, K, C, {16, 112, 112, 128});
+  RunTest(ri, GetParam());
+}
+
+TEST_P(TranscodeTest, Conv2d) {
+  using plaidml::edsl::LogicalShape;
+  LogicalShape I(PLAIDML_DATA_FLOAT32, {16, 112, 112, 64});
+  LogicalShape K(PLAIDML_DATA_FLOAT32, {3, 3, 64, 128});
+  using vertexai::tile::lib::LoadConv2d;
+  auto ri = LoadConv2d("foo", I, K, {16, 112, 112, 128});
+  RunTest(ri, GetParam());
+}
+
+static lang::RunInfo Evaluate(const std::string& name, const std::vector<Tensor>& vars) {
+  Program program(name, vars, {});
+  return *static_cast<const lang::RunInfo*>(program.runinfo());
+}
+
+Tensor Dot(const Tensor& X, const Tensor& Y) {
+  plaidml::edsl::TensorDim I, J, K;
+  TensorIndex i, j, k;
+  X.bind_dims(I, K);
+  Y.bind_dims(K, J);
+  auto R = TensorOutput(I, J);
+  R(i, j) += X(i, k) * Y(k, j);
+  return R;
+}
+
+TEST_P(TranscodeTest, DoubleDot) {
+  auto A = Placeholder(PLAIDML_DATA_FLOAT32, {10, 20});
+  auto B = Placeholder(PLAIDML_DATA_FLOAT32, {20, 30});
+  auto C = Placeholder(PLAIDML_DATA_FLOAT32, {30, 40});
+  auto ri = Evaluate("double_dot", {Dot(Dot(A, B), C)});
+  RunTest(ri, GetParam());
+}
+
+INSTANTIATE_TEST_CASE_P(NonTrivialLocs, TranscodeTest, ::testing::Values(false, true));

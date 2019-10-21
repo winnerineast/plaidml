@@ -5,39 +5,44 @@ package(default_visibility = ["//visibility:public"])
 load("//bzl:plaidml.bzl", "plaidml_cc_library", "plaidml_cc_test")
 load("//vendor/mlir:mlir.bzl", "COPTS", "mlir_tblgen")
 
+MLIR_TBLGEN_ALSO = [
+    "//pmlc/util:enums.td",
+    "//pmlc/dialect/eltwise:predicates.td",
+]
+
 mlir_tblgen(
     name = "gen-op-decls",
     src = "ops.td",
     out = "ops.h.inc",
     action = "-gen-op-decls",
-    also = ["//pmlc/dialect/eltwise:predicates.td"],
+    also = MLIR_TBLGEN_ALSO,
     incs = ["@mlir//:include"],
 )
 
 mlir_tblgen(
     name = "gen-op-defs",
     src = "ops.td",
-    out = "ops.cpp.inc",
+    out = "ops.cc.inc",
     action = "-gen-op-defs",
-    also = ["//pmlc/dialect/eltwise:predicates.td"],
+    also = MLIR_TBLGEN_ALSO,
     incs = ["@mlir//:include"],
 )
 
 mlir_tblgen(
-    name = "gen-op-enums-decls",
+    name = "gen-op-interface-decls",
     src = "ops.td",
-    out = "ops_enum.h.inc",
-    action = "-gen-enum-decls",
-    also = ["//pmlc/dialect/eltwise:predicates.td"],
+    out = "ops_interfaces.h.inc",
+    action = "-gen-op-interface-decls",
+    also = MLIR_TBLGEN_ALSO,
     incs = ["@mlir//:include"],
 )
 
 mlir_tblgen(
-    name = "gen-op-enums-defs",
+    name = "gen-op-interface-defs",
     src = "ops.td",
-    out = "ops_enum.cpp.inc",
-    action = "-gen-enum-defs",
-    also = ["//pmlc/dialect/eltwise:predicates.td"],
+    out = "ops_interfaces.cc.inc",
+    action = "-gen-op-interface-defs",
+    also = MLIR_TBLGEN_ALSO,
     incs = ["@mlir//:include"],
 )
 
@@ -47,8 +52,10 @@ plaidml_cc_library(
         "analysis.cc",
         "dialect.cc",
         "ops.cc",
-        "ops.cpp.inc",
-        "ops_enum.cpp.inc",
+        "ops.cc.inc",
+        "ops_interfaces.cc.inc",
+        "types.cc",
+        "util.cc",
     ],
     hdrs = [
         "analysis.h",
@@ -56,8 +63,9 @@ plaidml_cc_library(
         "mlir.h",
         "ops.h",
         "ops.h.inc",
-        "ops_enum.h.inc",
+        "ops_interfaces.h.inc",
         "types.h",
+        "util.h",
     ],
     copts = COPTS,
     tags = ["llvm"],
@@ -69,6 +77,7 @@ plaidml_cc_library(
         "@boost",
         "@llvm//:support",
         "@mlir//:IR",
+        "@mlir//:Parser",
         "@mlir//:StandardOps",
         "@mlir//:Transforms",
     ],
@@ -88,6 +97,7 @@ plaidml_cc_library(
     tags = ["llvm"],
     deps = [
         ":stripe",
+        "//pmlc/util",
         "//tile/stripe",
         "@mlir//:IR",
     ],

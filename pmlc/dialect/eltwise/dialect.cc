@@ -2,6 +2,8 @@
 
 #include "pmlc/dialect/eltwise/dialect.h"
 
+#include <utility>
+
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -27,14 +29,28 @@ struct OpAsmInterface : public mlir::OpAsmDialectInterface {
 
   /// Get a special name to use when printing the given operation. The desired
   /// name should be streamed into 'os'.
-  void getOpResultName(Operation* op, llvm::raw_ostream& os) const final {
-    if (auto const_op = llvm::dyn_cast<ScalarConstantOp>(op)) {
+  void getOpResultName(Operation* op, llvm::raw_ostream& os) const final {  // NOLINT
+    if (auto str_attr = op->getAttrOfType<mlir::StringAttr>("scalar_name")) {
+      std::string s = str_attr.getValue().str();
+      os << "s_" << s.substr(1);
+    } else if (auto const_op = llvm::dyn_cast<ScalarConstantOp>(op)) {
       auto attr = const_op.value();
       if (auto int_attr = attr.dyn_cast<IntegerAttr>()) {
         os << 'c' << int_attr.getValue();
       } else {
         os << "cst";
       }
+    }
+  }
+
+  void getTypeAliases(mlir::SmallVectorImpl<std::pair<Type, StringRef>>& aliases) const final {  // NOLINT
+    for (const auto dt : vertexai::tile::GetDataTypeSet()) {
+      // Intern the string
+      auto id = mlir::Identifier::get(to_string(dt), getDialect()->getContext());
+      // Get the type
+      Type t = RankedTensorType::get({}, ScalarType::get(getDialect()->getContext(), dt));
+      // Add the alias
+      aliases.push_back(std::make_pair(t, id));
     }
   }
 };
@@ -45,9 +61,16 @@ Dialect::Dialect(mlir::MLIRContext* ctx) : mlir::Dialect(getDialectNamespace(), 
   addTypes<ScalarType>();
   addOperations<
 #define GET_OP_LIST
-#include "pmlc/dialect/eltwise/ops.cpp.inc"
+#include "pmlc/dialect/eltwise/ops.cc.inc"
       >();
   addInterfaces<OpAsmInterface>();
+}
+
+std::string Dialect::getCanonicalOpName(llvm::StringRef name) {
+  if (name == "cond") {
+    name = "select";
+  }
+  return llvm::formatv("{0}.{1}", getDialectNamespace(), name).str();
 }
 
 mlir::Type Dialect::parseType(llvm::StringRef spec, mlir::Location loc) const {  //

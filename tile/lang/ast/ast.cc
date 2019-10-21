@@ -2,7 +2,7 @@
 
 #include "tile/lang/ast/ast.h"
 
-#include <set>
+#include <unordered_set>
 
 #include <boost/format.hpp>
 
@@ -157,6 +157,10 @@ class DimExprEvaluator : public DimVisitor {
         return lhs * rhs;
       case IntOp::Div:
         return lhs / rhs;
+      case IntOp::Max:
+        return std::max(lhs, rhs);
+      case IntOp::Min:
+        return std::min(lhs, rhs);
       default:
         throw std::runtime_error("Unknown DimOp");
     }
@@ -211,6 +215,11 @@ class ShapeEvaluator : public AstVisitor<void> {
     DimExprEvaluator dim_eval;
     auto value = expr.expr->Accept(&dim_eval);
     bindings_by_expr_->emplace(&expr, Binding{value});
+  }
+
+  void Visit(const GradOverrideExpr& expr) final {
+    // Forward-pass GradOverrideExprs are no-ops, so do almost nothing (just setup the shape)
+    bindings_by_expr_->emplace(&expr, Binding{IntoTensorShape(expr.shape)});
   }
 
  private:
@@ -269,6 +278,9 @@ class PolyEvaluator : public PolyVisitor {
               str(boost::format("Divisor of polynomials must be a constant: %1% / %2%") % lhs % rhs));
         }
         return lhs / rhs.constant();
+      case IntOp::Max:
+      case IntOp::Min:
+        throw std::runtime_error("Min/Max unsupported for polynomials");
       default:
         throw std::runtime_error("Unknown PolyOp");
         break;
@@ -385,6 +397,22 @@ class ProgramEvaluator : public AstVisitor<void> {
         {std::to_string(value)},  // inputs
         {},                       // Contraction
         {"iconst"},               // Function
+    };
+    eval_.runinfo.program.ops.emplace_back(op);
+    eval_.names_by_expr.emplace(&expr, name);
+  }
+
+  void Visit(const GradOverrideExpr& expr) final {
+    // Forward-pass GradOverrideExprs are no-ops; create an ident fcn
+    IVLOG(4, "ProgramEvaluator::Visit> " << to_string(&expr));
+    auto name = NewTmp(expr);
+    auto out_name = safe_at(&eval_.names_by_expr, expr.out.get());
+    Op op{
+        Op::FUNCTION,  // tag
+        name,          // output
+        {out_name},    // inputs
+        {},            // Contraction
+        {"ident"},     // Function
     };
     eval_.runinfo.program.ops.emplace_back(op);
     eval_.names_by_expr.emplace(&expr, name);
@@ -525,7 +553,7 @@ class ProgramEvaluator : public AstVisitor<void> {
   }
 
  private:
-  std::set<std::string> names_;
+  std::unordered_set<std::string> names_;
   std::unordered_map<const Expr*, Binding> bindings_by_expr_;
   ProgramEvaluation eval_;
 };
@@ -601,11 +629,14 @@ class ExprOptimizer : public AstPass {
 };
 
 ProgramEvaluation Evaluate(const std::string& name, ProgramMutations mutations) {
+  std::unordered_set<Expr*> dups;
   for (size_t i = 0; i < mutations.outputs.size(); i++) {
-    auto param_expr = std::dynamic_pointer_cast<ParamExpr>(mutations.outputs[i]);
-    if (param_expr) {
-      mutations.outputs[i] = MakeCall("ident", {mutations.outputs[i]});
+    auto output = mutations.outputs[i];
+    auto ptr = output.get();
+    if (std::dynamic_pointer_cast<ParamExpr>(output) || dups.count(ptr)) {
+      mutations.outputs[i] = MakeCall("ident", {output});
     }
+    dups.insert(ptr);
   }
   ExprOptimizer optimizer;
   return ProgramEvaluator(name).Evaluate(RunAstPass(mutations, &optimizer));
@@ -642,8 +673,7 @@ void LogicalShape::bind_dims(std::vector<DimExprPtr>* into) {
         boost::str(boost::format("bind_dims() mismatch. Tensor shape: %1%, dims: %2%") % dims.size() % into->size()));
   }
   for (size_t i = 0; i < dims.size(); i++) {
-    auto none_expr = std::dynamic_pointer_cast<DimNoneExpr>(into->at(i));
-    if (none_expr) {
+    if (auto none_expr = std::dynamic_pointer_cast<DimNoneExpr>(into->at(i))) {
       (*into)[i] = dims[i].expr;
     } else {
       auto lhs_int = std::dynamic_pointer_cast<DimIntExpr>(into->at(i));
@@ -700,8 +730,7 @@ void ParamExpr::ComputeShape(const std::shared_ptr<ParamExpr>& ref, const Logica
   shape.dims.clear();
   for (size_t i = 0; i < in_shape.dims.size(); i++) {
     const auto& dim = in_shape.dims[i];
-    auto int_expr = std::dynamic_pointer_cast<DimIntExpr>(dim.expr);
-    if (int_expr) {
+    if (auto int_expr = std::dynamic_pointer_cast<DimIntExpr>(dim.expr)) {
       if (int_expr->value) {
         shape.dims.push_back(dim);
       } else {
@@ -720,6 +749,30 @@ std::string ParamExpr::str() const {
   std::stringstream ss;
   ss << "ParamExpr{" << shape << "}";
   return ss.str();
+}
+
+GradOverrideExpr::GradOverrideExpr(const std::shared_ptr<ExprDerivEntry>& fn, const std::vector<ExprPtr>& ins,
+                                   const ExprPtr& out)
+    : fn(fn),    //
+      ins(ins),  //
+      out(out) {}
+
+std::string GradOverrideExpr::str() const {
+  std::stringstream ss;
+  ss << "grad_override";
+  // TODO: I found the more verbose version of this output confusing, so it's commented out
+  // ss << "{" << fn << "(";
+  // for (const auto& in : ins) {
+  //   ss << in << ", ";
+  // }
+  // ss << ") -> " << out << "}";
+  return ss.str();
+}
+
+void GradOverrideExpr::ComputeShape() {
+  IVLOG(5, "GradOverrideExpr::ComputeShape> fn: " << fn);
+  IVLOG(5, "  " << out->shape.str());
+  shape = out->shape;
 }
 
 CallExpr::CallExpr(const std::string& fn, const std::vector<ExprPtr>& args)
@@ -865,6 +918,10 @@ std::string to_string(IntOp op) {
       return "*";
     case IntOp::Div:
       return "/";
+    case IntOp::Max:
+      return "max";
+    case IntOp::Min:
+      return "min";
     default:
       throw std::runtime_error("Invalid op");
   }
@@ -881,6 +938,10 @@ std::string PolyOpExpr::str() const {
     case IntOp::Mul:
     case IntOp::Div:
       ss << "(" << operands[0]->str() << " " << to_string(op) << " " << operands[1]->str() << ")";
+      break;
+    case IntOp::Max:
+    case IntOp::Min:
+      throw std::runtime_error("During printing, encountered unexpected Max/Min polynomial op");
       break;
   }
   return ss.str();
@@ -903,6 +964,10 @@ std::string DimOpExpr::str() const {
     case IntOp::Mul:
     case IntOp::Div:
       ss << "(" << operands[0]->str() << " " << to_string(op) << " " << operands[1]->str() << ")";
+      break;
+    case IntOp::Max:
+    case IntOp::Min:
+      ss << to_string(op) << "(" << operands[0]->str() << ", " << operands[1]->str() << ")";
       break;
   }
   return ss.str();

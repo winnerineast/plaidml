@@ -50,7 +50,7 @@ local PARAMS = {
                 '@type': 'type.vertex.ai/vertexai.tile.codegen.proto.StencilPass',
                 reqs: ['agg_op_add', 'comb_op_mul'],
                 outer_set: ['mac'],
-                inner_set: ['mac_inner', 'xsmm'],
+                inner_set: ['mac_inner', 'xsmm', "cpu_thread"],
                 is_strict_dims: true,
                 stencils: [
                   {
@@ -228,6 +228,26 @@ local PARAMS = {
                 skip_tags: ['user'],
                 locs: [{ devs: [{ name: 'DRAM' }] }],
                 alignment: 16,
+              },
+            },
+
+            // Remove unused refinements after fusing, scalarization, and program placement
+            {
+              name: 'prune_refs',
+              pass: {
+                '@type': 'type.vertex.ai/vertexai.tile.codegen.proto.PruneRefinementsPass',
+                reqs: ['program'],
+              },
+            },
+
+            // Init aggregation outputs
+            // Keet this towards the end since other passes are generating intermediate blocks and the initialization 
+            // on aggregation transition could break in such cases.
+            {
+              name: 'init_aggregation_outputs',
+              pass: {
+                '@type': 'type.vertex.ai/vertexai.tile.codegen.proto.AggregationBlockOutputInitializationPass',
+                reqs: ['program'],
               },
             },
           ],

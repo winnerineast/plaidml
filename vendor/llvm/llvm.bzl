@@ -168,6 +168,7 @@ cmake_vars = {
     "LLVM_NATIVE_ASMPARSER": 1,
     "LLVM_NATIVE_DISASSEMBLER": 1,
     "LLVM_PREFIX": "/dev/null",
+    "LLVM_USE_INTEL_JITEVENTS": 1,
     "LLVM_VERSION_MAJOR": 0,
     "LLVM_VERSION_MINOR": 0,
     "LLVM_VERSION_PATCH": 0,
@@ -327,7 +328,7 @@ llvm_linkopts = select({
     "//conditions:default": [
         "-ldl",
         "-lm",
-        "-pthread",
+        "-lpthread",
     ],
 })
 
@@ -401,6 +402,15 @@ llvm_copts = select({
     ],
     "//conditions:default": [
         "-w",
+    ],
+})
+
+llvm_cxxopts = llvm_copts + select({
+    "@com_intel_plaidml//toolchain:windows_x86_64": [
+        "/std:c++14",
+    ],
+    "//conditions:default": [
+        "-std=c++14",
     ],
 })
 

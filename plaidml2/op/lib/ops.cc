@@ -501,9 +501,7 @@ std::pair<TensorDim, TensorDim> compute_padding_and_output_size(  //
   if (autopad_mode == AutopadMode::SAME_LOWER || autopad_mode == AutopadMode::SAME_UPPER) {
     TensorDim output_size((I_eff + stride - 1 + ceil_term) / stride);
     int64_t lower_term = (autopad_mode == AutopadMode::SAME_LOWER) ? 1 : 0;
-    // TensorDim pad_before((max(0, (output_size - 1) * stride + F_eff - I_eff) + upper_term) / 2);
-    // TODO: Switch to above once max(TensorDim, TensorDim) is working
-    TensorDim pad_before(((output_size - 1) * stride + F_eff - I_eff + lower_term) / 2);
+    TensorDim pad_before((max(0, (output_size - 1) * stride + F_eff - I_eff) + lower_term) / 2);
     return std::pair<TensorDim, TensorDim>(pad_before, output_size);
   }
   throw std::runtime_error(str(boost::format("Unexpected autopadding mode: %1%") % to_string(autopad_mode)));
@@ -626,8 +624,8 @@ Value binary_crossentropy(const Value& value) {
   if (args.size() != 3) {
     throw std::runtime_error("binary_crossentropy expects 3 arguments");
   }
-  auto T = args[0].as_tensor();  // Targets Tensor
-  auto raw_P = args[1];          // Predictions tensor Value, before clipping
+  auto T = ident(args[0].as_tensor());  // Targets Tensor; copied for safe gradient override
+  auto raw_P = args[1];                 // Predictions Tensor, before clipping
   auto epsilon = args[2].as_float();
 
   // Check args & set useful values
@@ -638,7 +636,22 @@ Value binary_crossentropy(const Value& value) {
   std::vector<Value> clip_inputs{raw_P, Value{epsilon}, Value{1. - epsilon}};
   auto P = clip(Value{clip_inputs}).as_tensor();
   auto O = -T * log(P) - (1 - T) * log(1 - P);
-  return Value{O};
+  TensorDeriv deriv = [](const Tensor& Y, const Tensor& DY, const std::vector<Tensor>& X) {  //
+    auto T = X[0];
+    auto P = X[1];
+    Tensor One{1.0};
+    auto ndims = T.shape().ndims();
+    std::vector<TensorDim> dims(ndims);
+    T.bind_dims(dims);
+    auto dims_prod = Tensor{1};
+    for (const auto& dim : dims) {
+      dims_prod = dims_prod * dim;
+    }
+    return std::vector<Tensor>{(log(One - P) - log(P)) / dims_prod, (-T / P + (One - T) / (One - P)) / dims_prod};
+  };
+  // Safe to use P without copy since it is built internally to this function
+  auto Overridden = OverrideGrads(deriv, std::vector<Tensor>{T, P}, O);
+  return Value{Overridden};
 }
 
 Value clip(const Value& value) {
@@ -2034,15 +2047,41 @@ Value reshape(const Value& value) {
   return Value{edsl::reshape(I, O_dims)};
 }
 
+Value scale_gradient(const Value& value) {
+  IVLOG(1, "scale_gradient");
+  auto args = value.as_tuple();
+  if (args.size() != 2) {
+    throw std::runtime_error("scale_gradient expects 2 arguments");
+  }
+  auto I = ident(args[0].as_tensor());  // Copy for safe gradient override
+  Tensor scale;
+  if (args[1].is_float()) {
+    // Cast scale to Tensor if it's given as a float
+    scale = Tensor{args[1].as_float()};
+  } else {
+    scale = ident(args[1].as_tensor());  // Copy for safe gradient override
+  }
+  auto O = I;  // Forward pass is NoOp
+  TensorDeriv deriv = [](const Tensor& Y, const Tensor& DY, const std::vector<Tensor>& X) {
+    return std::vector<Tensor>{X[1] * DY, Tensor{0.0}};
+  };
+  auto Overridden = OverrideGrads(deriv, std::vector<Tensor>{I, scale}, O);
+  return Value{Overridden};
+}
+
 Value sigmoid(const Value& value) {
   IVLOG(1, "sigmoid");
   auto args = value.as_tuple();
   if (args.size() != 1) {
     throw std::runtime_error("sigmoid expects 1 argument");
   }
-  auto I = args[0].as_tensor();
+  auto I = ident(args[0].as_tensor());  // Copy for safe gradient override
   auto O = 1.0 / (1.0 + exp(-I));
-  return Value{O};
+  TensorDeriv deriv = [](const Tensor& Y, const Tensor& DY, const std::vector<Tensor>& X) {  //
+    return std::vector<Tensor>{Y * (1.0 - Y) * DY};
+  };
+  auto Overridden = OverrideGrads(deriv, std::vector<Tensor>{I}, O);
+  return Value{Overridden};
 }
 
 Value slice(const Value& value) {
@@ -2181,11 +2220,30 @@ Value softmax(const Value& value) {
   if (args.size() != 2) {
     throw std::runtime_error("softmax expects 2 arguments");
   }
-  auto I = args[0].as_tensor();
-  auto axis = args[1].as_int();
+  auto I_original = args[0].as_tensor();
+  auto raw_axis = args[1].as_int();
+  auto I = ident(I_original);  // Copy for safe gradient override
 
   auto ndims = I.shape().ndims();
-  axis = normalize_axis(axis, ndims, "softmax");
+  auto axis = normalize_axis(raw_axis, ndims, "softmax");
+
+  // Ensure the axis is the last dimension, to make the derivative code happy
+  bool transposed = false;
+  std::vector<Value> pattern(ndims);  // Will be reused at the end to return to original order
+  if (axis != ndims - 1) {
+    transposed = true;
+    for (size_t i = 0; i < ndims; ++i) {
+      if (i == axis) {
+        pattern[i] = Value{ndims - 1};
+      } else if (i == ndims - 1) {
+        pattern[i] = Value{axis};
+      } else {
+        pattern[i] = Value{i};
+      }
+    }
+    I = transpose(Value{std::vector<Value>{args[0], Value{pattern}}}).as_tensor();
+    axis = ndims - 1;  // we've moved the softmax axis to be the last axis
+  }
 
   std::vector<TensorDim> I_dims(ndims);
   std::vector<TensorIndex> I_idxs(ndims);
@@ -2200,7 +2258,34 @@ Value softmax(const Value& value) {
   auto E = exp(I - M);
   auto N = TensorOutput(R_dims);
   N(R_idxs) += E(I_idxs);
-  return Value{E / N};
+  auto O = E / N;
+  TensorDeriv deriv = [](const Tensor& Y, const Tensor& DY, const std::vector<Tensor>& X) {  //
+    auto I = X[0];
+    auto ndims = I.shape().ndims();
+    std::vector<TensorDim> I_dims(ndims);
+    std::vector<TensorIndex> I_idxs(ndims);
+    I.bind_dims(I_dims);
+    std::vector<TensorDim> R_dims = I_dims;
+    std::vector<TensorIndex> R_idxs = I_idxs;
+    R_dims.back() = TensorDim{1};    // Softmax along last axis
+    R_idxs.back() = TensorIndex{0};  // Softmax along last axis
+
+    auto YdY = Y * DY;
+    auto T = TensorOutput(R_dims);
+    T(R_idxs) += YdY(I_idxs);
+    auto TB = TensorOutput(I_dims);
+    TB(I_idxs) += T(R_idxs);
+    return std::vector<Tensor>{YdY - TB * Y};
+  };
+  auto Overridden = OverrideGrads(deriv, std::vector<Tensor>{I}, O);
+  // If we reordered, return to original order
+  Tensor ret;
+  if (transposed) {
+    ret = transpose(Value{std::vector<Value>{Value{Overridden}, Value{pattern}}}).as_tensor();
+  } else {
+    ret = Overridden;
+  }
+  return Value{ret};
 }
 
 Value spatial_padding(const Value& value) {
@@ -2469,28 +2554,36 @@ Value squeeze(const Value& value) {
     throw std::runtime_error("Squeeze expects 2 arguments");
   }
 
-  // Read arguments
+  // argument 0: tensor to be squeezed
   auto I = args[0].as_tensor();
-  auto raw_axis = args[1].as_int();
-
-  // Validate arguments
   auto ndims = I.shape().ndims();
-  auto axis = normalize_axis(raw_axis, ndims, "squeeze");
   std::vector<TensorDim> I_dims(ndims);
-  std::vector<TensorIndex> I_idxs;
   std::vector<TensorDim> O_dims;
-  std::vector<TensorIndex> O_idxs;
   I.bind_dims(I_dims);
+
+  // argument 1: axes to squeeze upon
+  std::vector<int64_t> raw_axes;
+  if (args[1].is_int()) {
+    raw_axes.push_back(args[1].as_int());
+  } else {
+    raw_axes = args[1].as_int_tuple();
+  }
+  std::set<size_t> axes;
+  for (auto& raw_axis : raw_axes) {
+    axes.insert(normalize_axis(raw_axis, ndims, "squeeze"));
+  }
+
   for (size_t i = 0; i < ndims; ++i) {
-    I_idxs.emplace_back(str(boost::format("n%1%") % i));
-    if (i != axis) {
+    if (!axes.count(i)) {
       O_dims.push_back(I_dims[i]);
-      O_idxs.push_back(I_idxs[i]);
     }
   }
-  auto O = TensorOutput(O_dims);
-  O(O_idxs) = I(I_idxs);
-  return Value{O};
+  std::vector<Value> O_dims_values;
+  for (const auto dim : O_dims) {
+    O_dims_values.push_back(Value{dim});
+  }
+  std::vector<Value> reshape_args = {Value{I}, Value{O_dims_values}};
+  return reshape(Value{reshape_args});
 }
 
 Value sum(const Value& value) {
@@ -2687,6 +2780,7 @@ void RegisterOps() {
   registry->Register("relu", relu);
   registry->Register("repeat", repeat);
   registry->Register("reshape", reshape);
+  registry->Register("scale_gradient", scale_gradient);
   registry->Register("sigmoid", sigmoid);
   registry->Register("slice", slice);
   registry->Register("softmax", softmax);

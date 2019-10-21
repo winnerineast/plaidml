@@ -11,6 +11,7 @@ test --genrule_strategy=standalone
 run --genrule_strategy=standalone
 
 build --announce_rc
+build --nolegacy_external_runfiles
 build --distinct_host_configuration=false
 build:ro --remote_upload_local_results=false
 
@@ -51,6 +52,11 @@ build:macos_x86_64 --cpu=darwin_x86_64
 build:macos_x86_64 --apple_platform_type=macos
 build:macos_x86_64 --build_tag_filters=-large,-linux,-msvc
 test:macos_x86_64 --test_tag_filters=-large,-linux,-msvc
+
+build:macos_x86_64_ci --cpu=darwin_x86_64
+build:macos_x86_64_ci --apple_platform_type=macos
+build:macos_x86_64_ci --build_tag_filters=-large,-linux,-msvc,-not_ci
+test:macos_x86_64_ci --test_tag_filters=-large,-linux,-msvc,-not_ci
 
 build:windows_x86_64 --build_tag_filters=-darwin,-docs,-linux,-metal,-pytorch
 build:windows_x86_64 --action_env=CONDA_EXE

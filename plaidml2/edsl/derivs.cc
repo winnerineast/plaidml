@@ -40,6 +40,9 @@ void RegisterDerivs() {
   RegisterTensorDeriv("as_uint", [](DERIV_ARGS) {  //
     return Tensors{zero(), zero()};
   });
+  RegisterTensorDeriv("as_bool", [](DERIV_ARGS) {  //
+    return Tensors{zero()};
+  });
   RegisterTensorDeriv("bit_and", [](DERIV_ARGS) {  //
     return Tensors{zero(), zero()};
   });
@@ -104,6 +107,9 @@ void RegisterDerivs() {
   RegisterTensorDeriv("log", [](DERIV_ARGS) {  //
     return Tensors{DY / X[0]};
   });
+  RegisterTensorDeriv("ident", [](DERIV_ARGS) {  //
+    return Tensors{DY};
+  });
   RegisterTensorDeriv("index", [](DERIV_ARGS) {  //
     return Tensors{zero(), zero()};
   });
@@ -139,9 +145,6 @@ void RegisterDerivs() {
   });
   RegisterTensorDeriv("shape", [](DERIV_ARGS) {  //
     return Tensors{zero()};
-  });
-  RegisterTensorDeriv("sigmoid", [](DERIV_ARGS) {  //
-    return Tensors{Y * (1.0 - Y) * DY};
   });
   RegisterTensorDeriv("sin", [](DERIV_ARGS) {  //
     return Tensors{cos(X[0]) * DY};

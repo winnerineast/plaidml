@@ -37,6 +37,8 @@ PLATFORMS:
     variant: linux_x86_64
   keras-tf-cuda-gtx1070:
     variant: linux_x86_64
+  keras-tf-dnnl-cpu:
+    variant: linux_x86_64
   keras-plaid-ocl-gtx1070:
     variant: linux_x86_64
   keras-plaid-ocl-r9nano:
@@ -54,11 +56,11 @@ PLATFORMS:
   keras-plaid-mtl-hd630:
     variant: macos_x86_64
   keras-plaid-mtl-uhd630:
-    variant: macos_x86_64  
+    variant: macos_x86_64
   keras-stripe-mtl-uhd630:
     variant: macos_x86_64
   keras-plaid-mtl-iris655:
-    variant: macos_x86_64  
+    variant: macos_x86_64
   keras-plaid-ocl-neo:
     variant: linux_x86_64
   keras-plaid-ocl-gtx1050:
@@ -67,7 +69,7 @@ PLATFORMS:
     variant: linux_x86_64
   keras-plaid-ogl-gk20a:
     variant: linux_arm_32v7
-  keras-plaid-ocl-cpu:
+  keras-stripe-llvm-cpu:
     variant: linux_x86_64
   keras-plaid-ocl-gv100gl:
     variant: linux_x86_64
@@ -113,6 +115,7 @@ VARIANTS:
       PLAIDML_DEVICE: llvm_cpu.0
       PLAIDML_TARGET: llvm_cpu
   macos_x86_64:
+    bazel_config: macos_x86_64_ci
     arch: macosx_10_10_x86_64
     system: Darwin
     env:
@@ -124,7 +127,7 @@ VARIANTS:
     arch: win_amd64
     system: Windows
     env:
-      PLAIDML_DEVICE_IDS: opencl_cpu.0
+      PLAIDML_DEVICE_IDS: llvm_cpu.0
       PLAIDML_EXPERIMENTAL: 1
       PLAIDML_DEVICE: llvm_cpu.0
       PLAIDML_TARGET: llvm_cpu
@@ -133,6 +136,8 @@ VARIANTS:
 SUITES:
   smoke:
     platforms:
+      keras-stripe-llvm-cpu:
+        pipelines: [plaidml]
       keras-plaid-ocl-gp100gl:
         pipelines: [plaidml]
       keras-stripe-ocl-gp100gl:
@@ -166,9 +171,11 @@ SUITES:
 
   base:
     platforms:
-      keras-plaid-ocl-gfx803:
-        pipelines: [nightly]
-      keras-stripe-ocl-gfx803:
+      keras-stripe-llvm-cpu:
+        pipelines: [plaidml, nightly]
+      keras-stripe-ocl-neo:
+        pipelines: [plaidml, nightly]
+      keras-plaid-mtl-uhd630:
         pipelines: [plaidml, nightly]
 
       keras-plaid-ocl-gfx804:
@@ -231,14 +238,12 @@ SUITES:
     workloads:
       backend:
         args: [backend_test.py]
-        conda_env: conda/plaidml.yml
+        conda_env: conda/keras_backend_test.yml
         precision: untested
         platform_overrides:
           keras-stripe-ocl-gfx803:
             soft_fail: true
           keras-plaid-mtl-uhd630:
-            soft_fail: true
-          keras-stripe-mtl-uhd630:
             soft_fail: true
         shards: 3
       regression:
@@ -256,10 +261,43 @@ SUITES:
           keras-plaid-mtl-uhd630:
             soft_fail: true
 
+  base2:
+    # TODO: Merge this suite back into base once the directory structure coalesces
+    platforms:
+      keras-stripe-ocl-gp100gl:
+        pipelines: [plaidml, nightly]
+    params:
+      ci:
+        batch_sizes: [0]
+      plaidml:
+        batch_sizes: [0]
+      nightly:
+        batch_sizes: [0]
+    wheels:
+      # NOTE: this list must be in least to most dependent order.
+      - plaidml2-{version}-py2.py3-none-{arch}.whl
+      - plaidml2_keras-{version}-py2.py3-none-any.whl
+    timeout: 30
+    conda_env: conda/keras_backend_test.yml
+    compare: no
+    cwd: plaidml2/bridge/keras
+    runner: python
+    workloads:
+      backend:
+        args: [backend_test.py]
+        precision: untested
+        shards: 3
+
   infer:
     platforms:
+      keras-stripe-llvm-cpu:
+        pipelines: [plaidml, nightly]
       keras-tf-cuda-gp100gl:
         pipelines: [nightly]
+        append_args: [--tensorflow]
+
+      keras-tf-dnnl-cpu:
+        pipelines: [ci]
         append_args: [--tensorflow]
 
       keras-plaid-ocl-gfx803:
@@ -334,6 +372,7 @@ SUITES:
       imdb_lstm:
         precision: high
         skip_platforms: 
+          - keras-stripe-llvm-cpu
           - keras-stripe-ocl-gfx803
           - keras-stripe-ocl-gfx804
           - keras-stripe-ocl-gfx900
@@ -341,16 +380,21 @@ SUITES:
           - keras-stripe-ocl-gv100gl
           - keras-stripe-ocl-neo
           - keras-stripe-mtl-uhd630
+          - keras-tf-dnnl-cpu
         perf_threshold: 0.7
       inception_v3:
         precision: high
         platform_overrides:
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
           keras-plaid-ocl-gfx803:
-            prepend_args: [--examples, 256]
+            prepend_args: [--examples, 128]
           keras-plaid-ocl-gfx804:
             prepend_args: [--examples, 64]
           keras-stripe-ocl-gfx804:
             prepend_args: [--examples, 64]
+          keras-stripe-ocl-neo:
+            prepend_args: [--examples, 512]
           keras-plaid-mtl-uhd630:
             prepend_args: [--examples, 256]
           keras-stripe-mtl-uhd630:
@@ -359,16 +403,24 @@ SUITES:
             prepend_args: [--examples, 64]
           keras-stripe-ocl-gfx804:
             prepend_args: [--examples, 64]
+        skip_platforms: [keras-stripe-llvm-cpu]
       mobilenet:
         precision: high
+        platform_overrides:
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
       mobilenet_v2:
         precision: high
         platform_overrides:
           keras-plaid-mtl-uhd630:
             soft_fail: true
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
       resnet50:
         precision: high
         platform_overrides:
+          keras-stripe-llvm-cpu:
+            prepend_args: [--examples, 128]
           keras-plaid-ocl-gfx804:
             prepend_args: [--examples, 128]
           keras-stripe-ocl-gfx804:
@@ -381,9 +433,13 @@ SUITES:
             prepend_args: [--examples, 128]
           keras-stripe-ocl-gfx804:
             prepend_args: [--examples, 128]
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
       vgg19:
         precision: high
-        platform_overrides:
+        platform_overrides:          
+          keras-stripe-llvm-cpu:
+            prepend_args: [--examples, 64]
           keras-stripe-ocl-gfx803:
             prepend_args: [--examples, 256]
           keras-plaid-ocl-gfx804:
@@ -400,7 +456,14 @@ SUITES:
             prepend_args: [--examples, 64]
           keras-stripe-ocl-gfx804:
             prepend_args: [--examples, 64]
-        skip_platforms: [keras-plaid-mtl-uhd630, keras-stripe-mtl-uhd630, keras-plaid-ocl-gfx803]
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
+        skip_platforms: 
+          - keras-plaid-mtl-uhd630 
+          - keras-stripe-mtl-uhd630
+          - keras-plaid-ocl-gfx803
+          - keras-stripe-llvm-cpu
+
       xception:
         precision: high
         platform_overrides:
@@ -410,6 +473,8 @@ SUITES:
             prepend_args: [--examples, 64]
           keras-stripe-ocl-gfx804:
             prepend_args: [--examples, 64]
+          keras-stripe-ocl-gv100gl:
+            prepend_args: [--examples, 512]
           keras-plaid-ocl-neo:
             prepend_args: [--examples, 256]
           keras-stripe-ocl-neo:
@@ -421,38 +486,40 @@ SUITES:
           keras-stripe-mtl-uhd630:
             prepend_args: [--examples, 64]
             soft_fail: true
-        skip_platforms: [keras-plaid-ocl-gv100gl]
+          keras-tf-dnnl-cpu:
+            conda_env: conda/tensorflow-dnnl.yml
+        skip_platforms: [keras-plaid-ocl-gv100gl, keras-stripe-llvm-cpu]
 
   train:
     platforms:
       keras-tf-cuda-gp100gl:
-        pipelines: [nightly, ci]
+        pipelines: [train]
         append_args: [--tf]
 
       keras-plaid-ocl-gfx804:
-        pipelines: [nightly, train]
+        pipelines: [train]
       keras-stripe-ocl-gfx804:
-        pipelines: [nightly, train]
+        pipelines: [train]
 
       keras-plaid-ocl-gfx900:
-        pipelines: [nightly, train]
+        pipelines: [train]
       keras-stripe-ocl-gfx900:
-        pipelines: [nightly, train]
+        pipelines: [train]
 
       keras-plaid-ocl-gp100gl:
-        pipelines: [nightly, train]
+        pipelines: [train]
       keras-stripe-ocl-gp100gl:
-        pipelines: [nightly, train]
+        pipelines: [train]
 
       keras-plaid-ocl-neo:
-        pipelines: [nightly, train]
+        pipelines: [train]
       keras-stripe-ocl-neo:
-        pipelines: [nightly, train]
+        pipelines: [train]
 
       keras-plaid-mtl-uhd630:
-        pipelines: [nightly, train]
+        pipelines: [train]
       keras-stripe-mtl-uhd630:
-        pipelines: [nightly, train]
+        pipelines: [train]
 
     params:
       ci:
@@ -478,23 +545,26 @@ SUITES:
         # passing versions will pass; and non-memory errors will still error
         expected: "CL_MEM_OBJECT_ALLOCATION_FAILURE"
         precision: low
-        args: [plaidbench.py, inception_v3, --train, --print-stacktraces]
+        args: [plaidbench.py, inception_v3, --train, --print-stacktraces, --batch-size, '{batch_size}']
       resnet50_train:
         precision: low
-        args: [plaidbench.py, resnet50, --train, --print-stacktraces]
+        args: [plaidbench.py, resnet50, --train, --print-stacktraces, --batch-size, '{batch_size}']
       vgg19_train:
         precision: low
-        args: [plaidbench.py, vgg19, --train, --print-stacktraces]
+        args: [plaidbench.py, vgg19, --train, --print-stacktraces, --batch-size, '{batch_size}']
       xception_train:
         precision: low
-        args: [plaidbench.py, xception, --train, --print-stacktraces]
+        args: [plaidbench.py, xception, --train, --print-stacktraces, --batch-size, '{batch_size}']
         skip_platforms: keras-plaid-ocl-gp100gl
       mobilenet_train:
         precision: low
-        args: [plaidbench.py, mobilenet, --train, --print-stacktraces]
+        args: [plaidbench.py, mobilenet, --train, --print-stacktraces, --batch-size, '{batch_size}']
+
 
   comprehensive:
     platforms:
+      keras-stripe-llvm-cpu:
+        pipelines: [nightly]
       keras-tf-cuda-gp100gl:
         pipelines: [nightly]
         append_args: [--tensorflow]

@@ -1,9 +1,9 @@
 load("//bzl:conda_repo.bzl", "conda_repo")
 load("//bzl:xsmm_repo.bzl", "xsmm_repo")
+load("//vendor/bazel:http.bzl", "dev_http_archive")
 load("//vendor/cuda:configure.bzl", "configure_cuda")
 load("//vendor/cm:configure.bzl", "configure_cm")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-load("//bzl:dev_repo.bzl", "dev_http_archive")
 
 def plaidml_workspace():
     configure_toolchain()
@@ -160,19 +160,29 @@ def plaidml_workspace():
     )
 
     dev_http_archive(
+        name = "tbb",
+        url = "https://github.com/intel/tbb/archive/tbb_2019.zip",
+        sha256 = "078c969b1bbd6b2afb01f65cf9d513bb80636363b206f1e2ae221b614d7ae197",
+        strip_prefix = "tbb-tbb_2019",
+        build_file = Label("//bzl:tbb.BUILD"),
+    )
+
+    dev_http_archive(
         name = "llvm",
-        url = "https://github.com/llvm-mirror/llvm/archive/b7d166cebcf619a3691eed3f994384aab3d80fa6.zip",
-        sha256 = "61bc88374568cb0fc732432ec56bbab0e05c44b8f70f1f1868665204e9de2dba",
-        strip_prefix = "llvm-b7d166cebcf619a3691eed3f994384aab3d80fa6",
+        url = "https://github.com/llvm-mirror/llvm/archive/6d4c970c3440a7d3418b3222b663438bc343c0db.zip",
+        sha256 = "b74de0e5e0fe1f430ee974425acf7ab1ab49bc41ea1f02b57a668893c5abf92d",
+        strip_prefix = "llvm-6d4c970c3440a7d3418b3222b663438bc343c0db",
         build_file = Label("//vendor/llvm:llvm.BUILD"),
     )
 
     dev_http_archive(
         name = "mlir",
-        url = "https://github.com/plaidml/mlir/archive/68490b2de514d5c897335bce2948cd73230a2719.zip",
-        sha256 = "d659ed13f15ea05e65247ded6939a377271ab97015ad3a7814a09401006a5cf2",
-        strip_prefix = "mlir-68490b2de514d5c897335bce2948cd73230a2719",
+        url = "https://github.com/tensorflow/mlir/archive/85a65512321acb64b39cae93cdcb2a72d825208c.zip",
+        sha256 = "69bcd0a9e6bc1891874e9e9653a145e51f5465a6145ec3d6244f2d9293c16a91",
+        strip_prefix = "mlir-85a65512321acb64b39cae93cdcb2a72d825208c",
         build_file = Label("//vendor/mlir:mlir.BUILD"),
+        patches = [Label("//vendor/mlir:mlir.patch")],
+        patch_args = ["-p1"],
     )
 
 def configure_protobuf():
@@ -225,6 +235,14 @@ def configure_toolchain():
         sha256 = "9d69a302cab7e6b0a7c0e4cf98c24bc24dccb75baabd0bac5c58982606e1165f",
         strip_prefix = "x86_64-unknown-linux-gnu",
         url = "https://github.com/plaidml/depot/raw/master/toolchain/gcc-8.3/x86_64-unknown-linux-gnu-20190910.tgz",
+    )
+
+    http_archive(
+        name = "crosstool_ng_linux_x86_64_gcc_8.3.0",
+        build_file = Label("//toolchain:crosstool_ng/linux_x86_64.BUILD"),
+        sha256 = "091f5732882a499c6b9fb5fcb895176d0c96e958236e16b61d1a9cafec4271ad",
+        strip_prefix = "x86_64-unknown-linux-gnu",
+        url = "https://github.com/plaidml/depot/raw/master/toolchain/gcc-8.3/x86_64-unknown-linux-gnu-20191010.tgz",
     )
 
     http_archive(

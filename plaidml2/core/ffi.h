@@ -83,6 +83,9 @@ typedef struct {
 PLAIDML_CORE_API void plaidml_init(  //
     plaidml_error* err);
 
+PLAIDML_CORE_API void plaidml_shutdown(  //
+    plaidml_error* err);
+
 PLAIDML_CORE_API const char* plaidml_version(  //
     plaidml_error* err);
 
@@ -131,6 +134,7 @@ typedef enum {
   PLAIDML_DATA_FLOAT16 = 0x31,
   PLAIDML_DATA_FLOAT32 = 0x32,
   PLAIDML_DATA_FLOAT64 = 0x33,
+  PLAIDML_DATA_BFLOAT16 = 0x38,
   PLAIDML_DATA_PRNG = 0x40,
 } plaidml_datatype;
 

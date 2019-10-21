@@ -129,8 +129,7 @@ void Compiler::GenerateInvoker(const stripe::Block& program, llvm::Function* mai
     if (arenaSize_) {
       IVLOG(1, "Arena size: " << arenaSize_);
       // allocate the arena on the heap. This way static initialization order is never an issue.
-      std::vector<llvm::Value*> calloc_args{IndexConst(arenaSize_), IndexConst(1)};
-      auto buffer = builder_.CreateCall(CallocFunction(), calloc_args, "");
+      auto buffer = Malloc(arenaSize_);
       auto arena_gval = module_->getNamedGlobal(arena_name_);
       auto arenatype = llvm::ArrayType::get(builder_.getInt8Ty(), 1)->getPointerTo();
       builder_.CreateStore(builder_.CreateBitCast(buffer, arenatype), arena_gval);
@@ -148,9 +147,7 @@ void Compiler::GenerateInvoker(const stripe::Block& program, llvm::Function* mai
         args.push_back(builder_.CreateBitCast(elval, eltype));
       } else if (ref.has_tag("tmp")) {
         // Allocate a temporary buffer for this refinement
-        size_t size = ref.interior_shape.byte_size();
-        std::vector<llvm::Value*> calloc_args{IndexConst(size), IndexConst(1)};
-        auto buffer = builder_.CreateCall(CallocFunction(), calloc_args, "");
+        auto buffer = Malloc(ref.interior_shape.byte_size());
         allocs.push_back(buffer);
         llvm::Type* buftype = CType(ref.interior_shape.type)->getPointerTo();
         args.push_back(builder_.CreateBitCast(buffer, buftype));
@@ -170,8 +167,7 @@ void Compiler::GenerateInvoker(const stripe::Block& program, llvm::Function* mai
   builder_.CreateCall(main, args, "");
   // Free any temporary buffers we may have allocated.
   for (auto ptr : allocs) {
-    std::vector<llvm::Value*> free_args{ptr};
-    builder_.CreateCall(FreeFunction(), free_args, "");
+    Free(ptr);
   }
   builder_.CreateRetVoid();
 }
@@ -525,35 +521,26 @@ llvm::Function* Compiler::CompileBlock(const stripe::Block& block) {
     indexes_[idx.name].variable = variable;
   }
 
+  // compute the limit value for each loop
+  std::vector<llvm::Value*> limits(block.idxs.size());
+  for (size_t i = 0; i < block.idxs.size(); ++i) {
+    llvm::Value* init = indexes_[block.idxs[i].name].init;
+    llvm::Value* range = IndexConst(block.idxs[i].range);
+    limits[i] = builder_.CreateAdd(init, range);
+  }
+
   // EmitRunTimeLogEntry(block.name, "enter");
   ProfileBlockEnter(block);
 
   // generate the basic blocks for each nested loop's evaluation stages
-  std::vector<Loop> loops;
-  for (auto& idx : block.idxs) {
-    std::string name = idx.name;
-    auto init = llvm::BasicBlock::Create(context_, "init_" + name, function);
-    auto test = llvm::BasicBlock::Create(context_, "test_" + name, function);
-    auto body = llvm::BasicBlock::Create(context_, "body_" + name, function);
-    auto done = llvm::BasicBlock::Create(context_, "done_" + name, function);
-    loops.push_back({init, test, body, done});
-  }
-
   // initialize each loop index and generate the termination check
+  std::vector<Loop> loops(block.idxs.size());
   for (size_t i = 0; i < block.idxs.size(); ++i) {
-    builder_.CreateBr(loops[i].init);
-    builder_.SetInsertPoint(loops[i].init);
-    llvm::Value* variable = indexes_[block.idxs[i].name].variable;
-    llvm::Value* init = indexes_[block.idxs[i].name].init;
-    builder_.CreateStore(init, variable);
-    builder_.CreateBr(loops[i].test);
-    builder_.SetInsertPoint(loops[i].test);
-    llvm::Value* index = builder_.CreateLoad(variable);
-    llvm::Value* range = IndexConst(block.idxs[i].range);
-    llvm::Value* limit = builder_.CreateAdd(init, range);
-    llvm::Value* go = builder_.CreateICmpULT(index, limit);
-    builder_.CreateCondBr(go, loops[i].body, loops[i].done);
-    builder_.SetInsertPoint(loops[i].body);
+    std::string name = block.idxs[i].name;
+    llvm::Value* variable = indexes_[name].variable;
+    llvm::Value* init = indexes_[name].init;
+    CreateLoop(&loops[i], name);
+    EnterLoop(&loops[i], variable, init, limits[i]);
   }
 
   // check the constraints against the current index values and decide whether
@@ -587,12 +574,7 @@ llvm::Function* Compiler::CompileBlock(const stripe::Block& block) {
   // increment each index, from innermost to outermost, then jump back to test
   for (size_t i = block.idxs.size(); i-- > 0;) {
     llvm::Value* variable = indexes_[block.idxs[i].name].variable;
-    llvm::Value* index = builder_.CreateLoad(variable);
-    llvm::Value* increment = IndexConst(1);
-    index = builder_.CreateAdd(index, increment);
-    builder_.CreateStore(index, variable);
-    builder_.CreateBr(loops[i].test);
-    builder_.SetInsertPoint(loops[i].done);
+    LeaveLoop(&loops[i], variable);
   }
 
   ProfileBlockLeave(block);
@@ -706,8 +688,17 @@ void Compiler::Visit(const stripe::Special& special) {
   // tile/lang/gen_special.cc. The spec lists "zero", "copy", and "reshape",
   // while gen_special.cc uses "gather", "scatter", "shape", and "prng_step".
   static std::map<std::string, std::function<void(Compiler*, const stripe::Special&)>> handlers{
-      {"zero", &Compiler::Zero},          {"copy", &Compiler::Copy},   {"reshape", &Compiler::Reshape},
-      {"prng_step", &Compiler::PrngStep}, {"shape", &Compiler::Shape},
+      {"zero", &Compiler::Zero},                //
+      {"copy", &Compiler::Copy},                //
+      {"reshape", &Compiler::Reshape},          //
+      {"prng_step", &Compiler::PrngStep},       //
+      {"shape", &Compiler::Shape},              //
+      {"agg_init_add", &Compiler::AggInitAdd},  //
+      {"agg_init_mul", &Compiler::AggInitMul},  //
+      {"agg_init_min", &Compiler::AggInitMin},  //
+      {"agg_init_max", &Compiler::AggInitMax},  //
+      {"scatter", &Compiler::Scatter},          //
+      {"gather", &Compiler::Gather},            //
   };
   auto it = handlers.find(special.name);
   if (it == handlers.end()) {
@@ -766,6 +757,7 @@ void Compiler::Visit(const stripe::Intrinsic& intrinsic) {
       {"as_float", &Compiler::AsFloat},
       {"as_int", &Compiler::AsInt},
       {"as_uint", &Compiler::AsUInt},
+      {"as_bool", &Compiler::AsBool},
       {"floor", &Compiler::Floor},
       {"ceil", &Compiler::Ceil},
       {"round", &Compiler::Round},
@@ -819,9 +811,7 @@ void Compiler::Visit(const stripe::Block& block) {
         buffer = builder_.CreateGEP(baseArenaAddress, idxList);
       } else {
         // Allocate new storage for the buffer.
-        size_t size = ref.interior_shape.byte_size();
-        std::vector<llvm::Value*> calloc_args{IndexConst(size), IndexConst(1)};
-        buffer = builder_.CreateCall(CallocFunction(), calloc_args, "");
+        buffer = Malloc(ref.interior_shape.byte_size());
         allocs.push_back(buffer);
       }
       llvm::Type* buftype = CType(ref.interior_shape.type)->getPointerTo();
@@ -845,8 +835,7 @@ void Compiler::Visit(const stripe::Block& block) {
   builder_.CreateCall(function, args, "");
   // Free the temporary buffers we allocated as parameter values.
   for (auto ptr : allocs) {
-    std::vector<llvm::Value*> free_args{ptr};
-    builder_.CreateCall(FreeFunction(), free_args, "");
+    Free(ptr);
   }
 }
 
@@ -1291,6 +1280,14 @@ void Compiler::AsUInt(const stripe::Intrinsic& stmt) {
   ret.value->setName(stmt.outputs[0]);
 }
 
+void Compiler::AsBool(const stripe::Intrinsic& stmt) {
+  assert(1 == stmt.inputs.size());
+  Scalar ret = Cast(scalars_[stmt.inputs[0]], DataType::BOOLEAN);
+  assert(1 == stmt.outputs.size());
+  scalars_[stmt.outputs[0]] = ret;
+  ret.value->setName(stmt.outputs[0]);
+}
+
 void Compiler::BitRight(const stripe::Intrinsic& stmt) {
   assert(2 == stmt.inputs.size());
   Scalar lhs = Cast(scalars_[stmt.inputs[0]], stmt.type);
@@ -1312,7 +1309,7 @@ void Compiler::Exp(const stripe::Intrinsic& stmt) { CallIntrinsicFunc(stmt, "exp
 
 void Compiler::Log(const stripe::Intrinsic& stmt) { CallIntrinsicFunc(stmt, "logf", "log"); }
 
-void Compiler::Pow(const stripe::Intrinsic& stmt) { CallIntrinsicFunc(stmt, "powf", "pow"); }
+void Compiler::Pow(const stripe::Intrinsic& stmt) { CallIntrinsicFunc(stmt, "powf", "pow", 2); }
 
 void Compiler::Tanh(const stripe::Intrinsic& stmt) { CallIntrinsicFunc(stmt, "tanhf", "tanh"); }
 
@@ -1378,8 +1375,8 @@ void Compiler::PrngStep(const stripe::Special& prng_step) {
   Buffer out_state = buffers_[prng_step.outputs[0]];
   assert(out_state.refinement->interior_shape == in_state.refinement->interior_shape);
   Buffer dest = buffers_[prng_step.outputs[1]];
-  llvm::Type* int32ptrType = builder_.getInt32Ty()->getPointerTo();
-  llvm::Value* dest_arg = builder_.CreateBitCast(dest.base, int32ptrType);
+  llvm::Type* floatPtrType = builder_.getFloatTy()->getPointerTo();
+  llvm::Value* dest_arg = builder_.CreateBitCast(dest.base, floatPtrType);
   size_t dest_bytes = dest.refinement->interior_shape.byte_size();
   llvm::Value* count = IndexConst(dest_bytes / sizeof(uint32_t));
   std::vector<llvm::Value*> args{in_state.base, out_state.base, dest_arg, count};
@@ -1404,6 +1401,362 @@ void Compiler::Shape(const stripe::Special& shape) {
     llvm::Value* dest = builder_.CreateGEP(out.base, {IndexConst(i)});
     builder_.CreateStore(val, dest);
   }
+}
+
+void Compiler::AggInitAdd(const stripe::Special& agg_init) {
+  // One output: a tensor to initialize.
+  assert(0 == agg_init.inputs.size());
+  assert(1 == agg_init.outputs.size());
+  Buffer dest = buffers_[agg_init.outputs[0]];
+  auto& dest_shape = dest.refinement->interior_shape;
+  size_t bits = bit_width(dest_shape.type);
+  llvm::Type* eltype = CType(dest_shape.type);
+  llvm::Value* init_val = nullptr;
+  if (is_float(dest_shape.type)) {
+    init_val = llvm::ConstantFP::get(eltype, 0.0);
+  } else if (is_int(dest_shape.type) || is_uint(dest_shape.type)) {
+    auto apval = llvm::APInt::getNullValue(bits);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (DataType::BOOLEAN == dest_shape.type) {
+    init_val = builder_.getFalse();
+  }
+  AggInit(dest, init_val);
+}
+
+void Compiler::AggInitMul(const stripe::Special& agg_init) {
+  // One output: a tensor to initialize.
+  assert(0 == agg_init.inputs.size());
+  assert(1 == agg_init.outputs.size());
+  Buffer dest = buffers_[agg_init.outputs[0]];
+  auto& dest_shape = dest.refinement->interior_shape;
+  size_t bits = bit_width(dest_shape.type);
+  llvm::Type* eltype = CType(dest_shape.type);
+  llvm::Value* init_val = nullptr;
+  if (is_float(dest_shape.type)) {
+    init_val = llvm::ConstantFP::get(eltype, 1.0);
+  } else if (is_int(dest_shape.type) || is_uint(dest_shape.type)) {
+    auto apval = llvm::APInt(bits, 1);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (DataType::BOOLEAN == dest_shape.type) {
+    init_val = builder_.getTrue();
+  }
+  AggInit(dest, init_val);
+}
+
+void Compiler::AggInitMin(const stripe::Special& agg_init) {
+  // One output: a tensor to initialize.
+  assert(0 == agg_init.inputs.size());
+  assert(1 == agg_init.outputs.size());
+  Buffer dest = buffers_[agg_init.outputs[0]];
+  auto& dest_shape = dest.refinement->interior_shape;
+  size_t bits = bit_width(dest_shape.type);
+  llvm::Type* eltype = CType(dest_shape.type);
+  llvm::Value* init_val = nullptr;
+  if (is_float(dest_shape.type)) {
+    init_val = llvm::ConstantFP::getInfinity(eltype, /*Negative*/ false);
+  } else if (is_int(dest_shape.type)) {
+    auto apval = llvm::APInt::getSignedMaxValue(bits);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (is_uint(dest_shape.type)) {
+    auto apval = llvm::APInt::getMaxValue(bits);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (DataType::BOOLEAN == dest_shape.type) {
+    init_val = builder_.getTrue();
+  }
+  AggInit(dest, init_val);
+}
+
+void Compiler::AggInitMax(const stripe::Special& agg_init) {
+  // One output: a tensor to initialize.
+  assert(0 == agg_init.inputs.size());
+  assert(1 == agg_init.outputs.size());
+  Buffer dest = buffers_[agg_init.outputs[0]];
+  auto& dest_shape = dest.refinement->interior_shape;
+  size_t bits = bit_width(dest_shape.type);
+  llvm::Type* eltype = CType(dest_shape.type);
+  llvm::Value* init_val = nullptr;
+  if (is_float(dest_shape.type)) {
+    init_val = llvm::ConstantFP::getInfinity(eltype, /*Negative*/ true);
+  } else if (is_int(dest_shape.type)) {
+    auto apval = llvm::APInt::getSignedMinValue(bits);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (is_uint(dest_shape.type)) {
+    auto apval = llvm::APInt::getMinValue(bits);
+    init_val = llvm::ConstantInt::get(eltype, apval);
+  } else if (DataType::BOOLEAN == dest_shape.type) {
+    init_val = builder_.getFalse();
+  }
+  AggInit(dest, init_val);
+}
+
+void Compiler::AggInit(const Buffer& dest, llvm::Value* init_val) {
+  // The initialization value depends on the refinement's agg_op.
+  // Iterate over each dimension and write to each element.
+  auto& dest_shape = dest.refinement->interior_shape;
+  size_t dest_ndims = dest_shape.dims.size();
+
+  // Generate the limit value for each dimension.
+  std::vector<llvm::Value*> limits(dest_ndims);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    limits[i] = IndexConst(dest_shape.dims[i].size);
+  }
+
+  // Allocate an index variable for each loop.
+  std::vector<llvm::Value*> idx_vars(dest_ndims);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    std::string name = "idx_" + std::to_string(i);
+    idx_vars[i] = builder_.CreateAlloca(IndexType(), nullptr, name);
+  }
+
+  // Generate the initialization & limit test for each loop.
+  std::vector<Loop> loops(dest_ndims);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    std::string name = std::to_string(i);
+    CreateLoop(&loops[i], name);
+    EnterLoop(&loops[i], idx_vars[i], IndexConst(0), limits[i]);
+  }
+
+  if (!init_val) {
+    throw Error("Undefined agg_op init for " + to_string(dest_shape.type));
+  }
+
+  // Compute the element offset for these indexes.
+  llvm::Value* dest_idx = IndexConst(0);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(idx_vars[i]);
+    llvm::Value* stride = IndexConst(dest_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    dest_idx = builder_.CreateAdd(dest_idx, idx_val);
+  }
+  llvm::Value* dest_element = builder_.CreateGEP(dest.base, dest_idx);
+  builder_.CreateStore(init_val, dest_element);
+
+  // Terminate the loop by incrementing the index and repeating.
+  for (size_t i = dest_ndims; i-- > 0;) {
+    LeaveLoop(&loops[i], idx_vars[i]);
+  }
+}
+
+void Compiler::Scatter(const stripe::Special& scatter) {
+  // Three inputs: "data", "indices", "shape"; one output.
+  // For each value in "data", look up the corresponding location from
+  // "indices", then write the value to that location in the output.
+  // The "shape" parameter is a one-dimensional array of integers specifying
+  // the shape of the output tensor. We don't need this information since the
+  // output has already been allocated and we already know its shape.
+  assert(3 == scatter.inputs.size());
+  Buffer data = buffers_[scatter.inputs[0]];
+  auto& data_shape = data.refinement->interior_shape;
+  Buffer indices = buffers_[scatter.inputs[1]];
+  auto& indices_shape = indices.refinement->interior_shape;
+  Buffer shape = buffers_[scatter.inputs[2]];
+  auto& shape_shape = shape.refinement->interior_shape;
+  assert(1 == scatter.outputs.size());
+  Buffer output = buffers_[scatter.outputs[0]];
+  auto& output_shape = output.refinement->interior_shape;
+  assert(output_shape == shape_shape);
+
+  // Build a loop nest over each dimension of the data.
+  size_t data_ndims = data_shape.dims.size();
+  std::vector<llvm::Value*> limits(data_ndims);
+  std::vector<llvm::Value*> idx_vars(data_ndims);
+  for (size_t i = 0; i < data_ndims; ++i) {
+    std::string name = "idx_" + std::to_string(i);
+    idx_vars[i] = builder_.CreateAlloca(IndexType(), nullptr, name);
+    limits[i] = IndexConst(data_shape.dims[i].size);
+  }
+
+  // Generate the initialization & limit test for each loop
+  std::vector<Loop> loops(data_ndims);
+  for (size_t i = 0; i < data_ndims; ++i) {
+    std::string name = std::to_string(i);
+    CreateLoop(&loops[i], name);
+    EnterLoop(&loops[i], idx_vars[i], IndexConst(0), limits[i]);
+  }
+
+  // Body of the loop nest
+  // Look up the value of the data element.
+  llvm::Value* data_idx = IndexConst(0);
+  for (size_t i = 0; i < data_ndims; ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(idx_vars[i]);
+    llvm::Value* stride = IndexConst(data_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    data_idx = builder_.CreateAdd(data_idx, idx_val);
+  }
+  llvm::Value* data_element = builder_.CreateGEP(data.base, data_idx);
+  llvm::Value* data_val = builder_.CreateLoad(data_element);
+
+  // Look up the index value corresponding to this position.
+  auto idx_var_iter = idx_vars.begin();
+  llvm::Value* indirect_idx = IndexConst(0);
+  for (size_t i = 0; i < indices_shape.dims.size(); ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(*idx_var_iter++);
+    llvm::Value* stride = IndexConst(indices_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    indirect_idx = builder_.CreateAdd(indirect_idx, idx_val);
+  }
+  llvm::Value* indirect_element = builder_.CreateGEP(indices.base, indirect_idx);
+  llvm::Value* indirect_val = builder_.CreateLoad(indirect_element);
+
+  // Clamp the index value to the output range; that is, the size of the first
+  // output dimension.
+  bool ind_signed = !is_uint(indices_shape.type);
+  auto cast_op = llvm::CastInst::getCastOpcode(indirect_val, ind_signed, IndexType(), false);
+  indirect_val = builder_.CreateCast(cast_op, indirect_val, IndexType());
+  llvm::Value* ind_limit = IndexConst(output_shape.dims[0].size);
+  llvm::Value* must_clamp = builder_.CreateICmpUGT(indirect_val, ind_limit);
+  indirect_val = builder_.CreateSelect(must_clamp, ind_limit, indirect_val);
+
+  // Using the indirect index as the zero-dimension coordinate and continuing
+  // with the remaining idx_vars unused by the indices lookup, locate the
+  // output element, then write the data_val. This is not actually a simple
+  // store, as one might expect, and as the keras & tensorflow documentation
+  // seemingly implies, but an aggregation (add).
+  llvm::Value* indirect_stride = IndexConst(output_shape.dims[0].stride);
+  llvm::Value* dest_idx = builder_.CreateMul(indirect_val, indirect_stride);
+  for (size_t i = 1; i < output_shape.dims.size(); ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(*idx_var_iter++);
+    llvm::Value* stride = IndexConst(output_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    dest_idx = builder_.CreateAdd(dest_idx, idx_val);
+  }
+  llvm::Value* dest_element = builder_.CreateGEP(output.base, dest_idx);
+  llvm::Value* old_dest_val = builder_.CreateLoad(dest_element);
+  if (is_float(data_shape.type)) {
+    data_val = builder_.CreateFAdd(old_dest_val, data_val);
+  } else {
+    data_val = builder_.CreateAdd(old_dest_val, data_val);
+  }
+  builder_.CreateStore(data_val, dest_element);
+
+  // Terminate the loop by incrementing the index and repeating.
+  for (size_t i = data_ndims; i-- > 0;) {
+    LeaveLoop(&loops[i], idx_vars[i]);
+  }
+}
+
+void Compiler::Gather(const stripe::Special& gather) {
+  // Two inputs: "data" and "indices", and one output.
+  // For each value in "indices", look up the corresponding element from "data"
+  // and write it into the output.
+  assert(2 == gather.inputs.size());
+  Buffer data = buffers_[gather.inputs[0]];
+  auto& data_shape = data.refinement->interior_shape;
+  Buffer indices = buffers_[gather.inputs[1]];
+  auto& indices_shape = indices.refinement->interior_shape;
+  assert(1 == gather.outputs.size());
+  Buffer dest = buffers_[gather.outputs[0]];
+  auto& dest_shape = dest.refinement->interior_shape;
+  // Build a loop nest for each dimension of "indices".
+  // Look up the index value, which must be an integer.
+  // Clamp the index value to the range of dimension 0 of "data".
+  // Build a loop nest for each remaining dimension of "data".
+  // Copy the element value from "data" to "dest".
+  size_t outer_ndims = indices_shape.dims.size();
+  size_t inner_ndims = data_shape.dims.size() - 1;
+  size_t dest_ndims = dest_shape.dims.size();
+  assert(dest_ndims == outer_ndims + inner_ndims);
+
+  // Compute the limit for each loop based on the tensor shape extents
+  std::vector<llvm::Value*> limits(dest_ndims);
+  for (size_t i = 0; i < outer_ndims; ++i) {
+    limits[i] = IndexConst(indices_shape.dims[i].size);
+  }
+  for (size_t i = 0; i < inner_ndims; ++i) {
+    limits[i + outer_ndims] = IndexConst(data_shape.dims[1 + i].size);
+  }
+
+  // Allocate index vars for each loop
+  std::vector<llvm::Value*> idx_vars(dest_ndims);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    std::string name = "idx_" + std::to_string(i);
+    idx_vars[i] = builder_.CreateAlloca(IndexType(), nullptr, name);
+  }
+
+  // Generate the initialization & limit test for each loop
+  std::vector<Loop> loops(dest_ndims);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    std::string name = std::to_string(i);
+    CreateLoop(&loops[i], name);
+    EnterLoop(&loops[i], idx_vars[i], IndexConst(0), limits[i]);
+  }
+
+  // Body of the loop nest: look up an index value from "indexes" using the
+  // outer_ndims, then use that index plus the inner_ndims to look up a value
+  // from "data"; use all of the dest_ndims to write that into "dest".
+  llvm::Value* outer_idx = IndexConst(0);
+  for (size_t i = 0; i < outer_ndims; ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(idx_vars[i]);
+    llvm::Value* stride = IndexConst(indices_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    outer_idx = builder_.CreateAdd(outer_idx, idx_val);
+  }
+  llvm::Value* indirect_element = builder_.CreateGEP(indices.base, outer_idx);
+  llvm::Value* indirect_val = builder_.CreateLoad(indirect_element);
+
+  // Clamp the indirect val, for safety. Convert to unsigned integer, thereby
+  // throwing away negative values, then compare against the destination's
+  // zero'th-dimension size.
+  bool ind_signed = !is_uint(indices_shape.type);
+  auto cast_op = llvm::CastInst::getCastOpcode(indirect_val, ind_signed, IndexType(), false);
+  indirect_val = builder_.CreateCast(cast_op, indirect_val, IndexType());
+  llvm::Value* ind_limit = IndexConst(data_shape.dims[0].size);
+  llvm::Value* must_clamp = builder_.CreateICmpUGT(indirect_val, ind_limit);
+  indirect_val = builder_.CreateSelect(must_clamp, ind_limit, indirect_val);
+
+  llvm::Value* indirect_stride = IndexConst(data_shape.dims[0].stride);
+  llvm::Value* inner_idx = builder_.CreateMul(indirect_val, indirect_stride);
+  for (size_t i = 0; i < inner_ndims; ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(idx_vars[i + outer_ndims]);
+    llvm::Value* stride = IndexConst(data_shape.dims[1 + i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    inner_idx = builder_.CreateAdd(inner_idx, idx_val);
+  }
+  llvm::Value* data_element = builder_.CreateGEP(data.base, inner_idx);
+  llvm::Value* data_val = builder_.CreateLoad(data_element);
+
+  llvm::Value* dest_idx = IndexConst(0);
+  for (size_t i = 0; i < dest_ndims; ++i) {
+    llvm::Value* idx_val = builder_.CreateLoad(idx_vars[i]);
+    llvm::Value* stride = IndexConst(dest_shape.dims[i].stride);
+    idx_val = builder_.CreateMul(idx_val, stride);
+    dest_idx = builder_.CreateAdd(dest_idx, idx_val);
+  }
+  llvm::Value* dest_element = builder_.CreateGEP(dest.base, dest_idx);
+  builder_.CreateStore(data_val, dest_element);
+
+  // Terminate the loop by incrementing the index and repeating.
+  for (size_t i = dest_ndims; i-- > 0;) {
+    LeaveLoop(&loops[i], idx_vars[i]);
+  }
+}
+
+void Compiler::CreateLoop(Loop* loop, std::string name) {
+  llvm::Function* func = builder_.GetInsertBlock()->getParent();
+  loop->init = llvm::BasicBlock::Create(context_, "init_" + name, func);
+  loop->test = llvm::BasicBlock::Create(context_, "test_" + name, func);
+  loop->body = llvm::BasicBlock::Create(context_, "body_" + name, func);
+  loop->done = llvm::BasicBlock::Create(context_, "done_" + name, func);
+  builder_.CreateBr(loop->init);
+}
+
+void Compiler::EnterLoop(Loop* loop, llvm::Value* variable, llvm::Value* init, llvm::Value* limit) {
+  builder_.SetInsertPoint(loop->init);
+  builder_.CreateStore(init, variable);
+  builder_.CreateBr(loop->test);
+  builder_.SetInsertPoint(loop->test);
+  llvm::Value* idx_val = builder_.CreateLoad(variable);
+  llvm::Value* go = builder_.CreateICmpULT(idx_val, limit);
+  builder_.CreateCondBr(go, loop->body, loop->done);
+  builder_.SetInsertPoint(loop->body);
+}
+
+void Compiler::LeaveLoop(Loop* loop, llvm::Value* variable) {
+  llvm::Value* index = builder_.CreateLoad(variable);
+  index = builder_.CreateAdd(index, IndexConst(1));
+  builder_.CreateStore(index, variable);
+  builder_.CreateBr(loop->test);
+  builder_.SetInsertPoint(loop->done);
 }
 
 Compiler::Scalar Compiler::Cast(Scalar v, DataType to_type) {
@@ -1493,16 +1846,47 @@ void Compiler::OutputBool(llvm::Value* ret, const stripe::Intrinsic& intrinsic) 
   ret->setName(intrinsic.outputs[0]);
 }
 
-void Compiler::CallIntrinsicFunc(const stripe::Intrinsic& stmt, const char* name_f32, const char* name_f64) {
-  assert(1 == stmt.inputs.size());
-  Scalar op = Cast(scalars_[stmt.inputs[0]], stmt.type);
-  std::vector<llvm::Value*> argvals{op.value};
+void Compiler::CallIntrinsicFunc(const stripe::Intrinsic& stmt, const char* name_f32, const char* name_f64,
+                                 const size_t numParamsIn) {
+  size_t numParams = stmt.inputs.size();
+  switch (numParamsIn) {
+    case 1:
+      if (numParams != 1) {
+        throw std::runtime_error("CallIntrinsicFunction expects 1 parameter");
+      }
+      break;
+    case 2:
+      if (numParams != 2) {
+        throw std::runtime_error("CallIntrinsicFunction expects 2 parameters");
+      }
+      break;
+    default:
+      throw std::runtime_error("CallIntrinsicFunction expects 1 or 2 parameters");
+  }
+
+  Scalar op1 = Cast(scalars_[stmt.inputs[0]], stmt.type);
+  Scalar op2;
+
+  if (numParamsIn == 2) {
+    op2 = Cast(scalars_[stmt.inputs[1]], stmt.type);
+  }
+
+  std::vector<llvm::Value*> argvals;
+  argvals.emplace_back(op1.value);
+  if (numParamsIn == 2) {
+    argvals.emplace_back(op2.value);
+  }
+
   // C intrinsics come in either f32 or f64 flavors. We'll use f32 for single
   // and half-precision float inputs, f64 for ints and doubles
   bool use_f32 = (stmt.type == DataType::FLOAT16 || stmt.type == DataType::FLOAT32);
   const char* name = use_f32 ? name_f32 : name_f64;
   llvm::Type* ctype = use_f32 ? builder_.getFloatTy() : builder_.getDoubleTy();
-  std::vector<llvm::Type*> argtypes{ctype};
+  std::vector<llvm::Type*> argtypes;
+  argtypes.emplace_back(ctype);
+  if (numParamsIn == 2) {
+    argtypes.emplace_back(ctype);
+  }
   auto functype = llvm::FunctionType::get(ctype, argtypes, false);
   auto func = module_->getOrInsertFunction(name, functype).getCallee();
   llvm::Value* ret = builder_.CreateCall(func, argvals, "");
@@ -1562,19 +1946,21 @@ llvm::Value* Compiler::XSMMDispatchFunction(llvm::Type* alphaPtrType, llvm::Type
   return module_->getOrInsertFunction(functionName.c_str(), functype).getCallee();
 }
 
-llvm::Value* Compiler::MallocFunction(void) {
+llvm::Value* Compiler::Malloc(size_t size) {
   std::vector<llvm::Type*> argtypes{IndexType()};
   llvm::Type* rettype = builder_.getInt8PtrTy();
   auto functype = llvm::FunctionType::get(rettype, argtypes, false);
   const char* funcname = "malloc";
-  return module_->getOrInsertFunction(funcname, functype).getCallee();
+  auto func = module_->getOrInsertFunction(funcname, functype).getCallee();
+  auto buffer = builder_.CreateCall(func, {IndexConst(size)}, "");
+  return buffer;
 }
 
 llvm::Value* Compiler::RunTimeLogEntry(void) {
   std::vector<llvm::Type*> argtypes{
       builder_.getInt8Ty()->getPointerTo(),
       builder_.getInt8Ty()->getPointerTo(),
-      builder_.getInt64Ty(),
+      builder_.getFloatTy(),
   };
   llvm::Type* rettype = llvm::Type::getVoidTy(context_);
   auto functype = llvm::FunctionType::get(rettype, argtypes, false);
@@ -1588,33 +1974,27 @@ void Compiler::EmitRunTimeLogEntry(const std::string& str, const std::string& ex
       builder_.CreateGlobalStringPtr(extra),
   };
   if (value) {
-    log_args.push_back(builder_.CreatePtrToInt(value, builder_.getInt64Ty()));
+    log_args.push_back(value);
   } else {
-    log_args.push_back(builder_.getInt64(0));
+    log_args.push_back(llvm::ConstantFP::get(builder_.getFloatTy(), 0.0));
   }
   auto buffer = builder_.CreateCall(RunTimeLogEntry(), log_args, "");
 }
 
-llvm::Value* Compiler::CallocFunction(void) {
-  std::vector<llvm::Type*> argtypes{IndexType(), IndexType()};
-  llvm::Type* rettype = builder_.getInt8PtrTy();
-  auto functype = llvm::FunctionType::get(rettype, argtypes, false);
-  const char* funcname = "calloc";
-  return module_->getOrInsertFunction(funcname, functype).getCallee();
-}
-
-llvm::Value* Compiler::FreeFunction(void) {
+void Compiler::Free(llvm::Value* buffer) {
   llvm::Type* ptrtype = builder_.getInt8PtrTy();
   std::vector<llvm::Type*> argtypes{ptrtype};
   llvm::Type* rettype = llvm::Type::getVoidTy(context_);
   auto functype = llvm::FunctionType::get(rettype, argtypes, false);
   const char* funcname = "free";
-  return module_->getOrInsertFunction(funcname, functype).getCallee();
+  auto func = module_->getOrInsertFunction(funcname, functype).getCallee();
+  builder_.CreateCall(func, {buffer}, "");
 }
 
 llvm::Value* Compiler::PrngStepFunction(void) {
+  llvm::Type* floatPtrType = builder_.getFloatTy()->getPointerTo();
   llvm::Type* int32ptrType = builder_.getInt32Ty()->getPointerTo();
-  std::vector<llvm::Type*> argtypes{int32ptrType, int32ptrType, int32ptrType, IndexType()};
+  std::vector<llvm::Type*> argtypes{int32ptrType, int32ptrType, floatPtrType, IndexType()};
   llvm::Type* rettype = llvm::Type::getVoidTy(context_);
   auto functype = llvm::FunctionType::get(rettype, argtypes, false);
   const char* funcname = "prng_step";

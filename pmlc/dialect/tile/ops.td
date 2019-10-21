@@ -1,6 +1,10 @@
 // Copyright 2019, Intel Corporation
 
+include "pmlc/util/enums.td"
+include "pmlc/util/interfaces.td"
+include "pmlc/dialect/eltwise/interfaces.td"
 include "pmlc/dialect/eltwise/predicates.td"
+include "pmlc/dialect/tile/interfaces.td"
 
 def TileDialect : Dialect {
   let name = "tile";
@@ -19,8 +23,8 @@ def PlaceholderOp : TileOp<"var"> {
   let results = (outs Eltwise_AnyTensor:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, RankedTensorType type", [{
-      result->addTypes(type);
+    "Builder* builder, OperationState& result, RankedTensorType type", [{
+      result.addTypes(type);
     }]
   >];
 }
@@ -45,11 +49,11 @@ def DimOp : TileOp<"dim">, HasFolder {
   let results = (outs Index:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, Value* tensor, int64_t value", [{
+    "Builder* builder, OperationState& result, Value* tensor, int64_t value", [{
       auto type = builder->getIndexType();
-      result->addOperands(tensor);
-      result->addAttribute("dim", builder->getIntegerAttr(type, value));
-      result->addTypes(type);
+      result.addOperands(tensor);
+      result.addAttribute("dim", builder->getIntegerAttr(type, value));
+      result.addTypes(type);
     }]
   >];
 }
@@ -60,9 +64,9 @@ def AffineConstantOp : TileOp<"const_dim">, HasFolder {
   let results = (outs Index:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, int64_t value", [{
-      result->addAttribute("value", builder->getI64IntegerAttr(value));
-      result->addTypes(builder->getIndexType());
+    "Builder* builder, OperationState& result, int64_t value", [{
+      result.addAttribute("value", builder->getI64IntegerAttr(value));
+      result.addTypes(builder->getIndexType());
     }]
   >];
 
@@ -76,8 +80,8 @@ def AffineIndexOp : TileOp<"idx"> {
   let results = (outs Index:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result", [{
-      result->addTypes(builder->getIndexType());
+    "Builder* builder, OperationState& result", [{
+      result.addTypes(builder->getIndexType());
     }]
   >];
 }
@@ -86,9 +90,9 @@ class AffineOp<string mnemonic> : TileOp<mnemonic, [NoSideEffect]>, HasFolder {
   let results = (outs Index:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, ArrayRef<Value*> operands", [{
-      result->addOperands(operands);
-      result->addTypes(builder->getIndexType());
+    "Builder* builder, OperationState& result, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(builder->getIndexType());
     }]
   >];
 }
@@ -122,6 +126,14 @@ def AffineSubOp : AffineBinaryOp<"affine_sub"> {
   let summary = "Affine subtraction operation";
 }
 
+def AffineMaxOp : AffineBinaryOp<"affine_max"> {
+  let summary = "Affine max operation";
+}
+
+def AffineMinOp : AffineBinaryOp<"affine_min"> {
+  let summary = "Affine min operation";
+}
+
 def AffineDomainOp : TileOp<"domain">, HasCanonicalizer {
   let summary = "affine domain";
   let results = (outs Eltwise_AnyTensor:$result);
@@ -130,27 +142,27 @@ def AffineDomainOp : TileOp<"domain">, HasCanonicalizer {
 
 def AffineSourceIndexMapOp : TileOp<"src_idx_map", [HasParent<"AffineDomainOp">]> {
   let summary = "affine source index map";
-  let arguments = (ins Eltwise_AnyTensor:$tensor, Variadic<Index>:$idxs);
+  let arguments = (ins Eltwise_AnyTensor:$tensor, Variadic<Index>:$dims);
   let results = (outs AffineIndexMap:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, Value* tensor, ArrayRef<Value*> idxs", [{
-      result->addOperands(tensor);
-      result->addOperands(idxs);
-      result->addTypes(builder->getType<AffineIndexMapType>());
+    "Builder* builder, OperationState& result, Value* tensor, ArrayRef<Value*> dims", [{
+      result.addOperands(tensor);
+      result.addOperands(dims);
+      result.addTypes(builder->getType<AffineIndexMapType>());
     }]
   >];
 }
 
 def AffineSinkIndexMapOp : TileOp<"sink_idx_map", [HasParent<"AffineDomainOp">]> {
   let summary = "affine sink index map";
-  let arguments = (ins Variadic<Index>:$idxs);
+  let arguments = (ins Variadic<Index>:$dims);
   let results = (outs AffineIndexMap:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, ArrayRef<Value*> idxs", [{
-      result->addOperands(idxs);
-      result->addTypes(builder->getType<AffineIndexMapType>());
+    "Builder* builder, OperationState& result, ArrayRef<Value*> dims", [{
+      result.addOperands(dims);
+      result.addTypes(builder->getType<AffineIndexMapType>());
     }]
   >];
 }
@@ -161,141 +173,267 @@ def AffineSizeMapOp : TileOp<"size_map", [HasParent<"AffineDomainOp">]> {
   let results = (outs AffineSizeMap:$result);
 
   let builders = [OpBuilder<
-    "Builder* builder, OperationState* result, ArrayRef<Value*> sizes", [{
-      result->addOperands(sizes);
-      result->addTypes(builder->getType<AffineSizeMapType>());
+    "Builder* builder, OperationState& result, ArrayRef<Value*> sizes", [{
+      result.addOperands(sizes);
+      result.addTypes(builder->getType<AffineSizeMapType>());
     }]
   >];
 }
 
-class ContractionOp<string mnemonic> :
-    TileOp<mnemonic, [Terminator, HasParent<"AffineDomainOp">]>;
+class ContractionOp<string mnemonic, list<OpTrait> traits = []> :
+    TileOp<mnemonic, !listconcat(traits, [
+      Terminator,
+      HasParent<"AffineDomainOp">,
+      ContractionOpInterface
+    ])>;
 
-class UnaryConOp<string mnemonic> : ContractionOp<mnemonic> {
+class UnaryConOp<string mnemonic, string agg, string combo> : ContractionOp<mnemonic> {
   let arguments = (ins
     AffineSizeMap:$size,
     AffineIndexMap:$src,
     AffineIndexMap:$sink);
+
+  let extraClassDeclaration = [{
+    Value* getSizeMap() { return size(); }
+    std::vector<Value*> getSourceIndexMaps() { return {src()}; }
+    Value* getSinkIndexMap() { return sink(); }
+    unsigned getNumOperands() { return 1; }
+    AggregationKind getAggregationKind() { return AggregationKind::}] # agg # [{; }
+    CombinationKind getCombinationKind() { return CombinationKind::}] # combo # [{; }
+  }];
 }
 
-class BinaryConOp<string mnemonic> : ContractionOp<mnemonic> {
+class BinaryConOp<string mnemonic, string agg, string combo> : ContractionOp<mnemonic> {
   let arguments = (ins
     AffineSizeMap:$size,
     AffineIndexMap:$src1,
     AffineIndexMap:$src2,
     AffineIndexMap:$sink);
+
+  let extraClassDeclaration = [{
+    Value* getSizeMap() { return size(); }
+    std::vector<Value*> getSourceIndexMaps() { return {src1(), src2()}; }
+    Value* getSinkIndexMap() { return sink(); }
+    unsigned getNumOperands() { return 2; }
+    AggregationKind getAggregationKind() { return AggregationKind::}] # agg # [{; }
+    CombinationKind getCombinationKind() { return CombinationKind::}] # combo # [{; }
+  }];
 }
 
-class TernaryConOp<string mnemonic> : ContractionOp<mnemonic> {
+class TernaryConOp<string mnemonic, string agg, string combo> : ContractionOp<mnemonic> {
   let arguments = (ins
     AffineSizeMap:$size,
     AffineIndexMap:$src1,
     AffineIndexMap:$src2,
     AffineIndexMap:$src3,
     AffineIndexMap:$sink);
+
+  let extraClassDeclaration = [{
+    Value* getSizeMap() { return size(); }
+    std::vector<Value*> getSourceIndexMaps() { return {src1(), src2(), src3()}; }
+    Value* getSinkIndexMap() { return sink(); }
+    unsigned getNumOperands() { return 3; }
+    AggregationKind getAggregationKind() { return AggregationKind::}] # agg # [{; }
+    CombinationKind getCombinationKind() { return CombinationKind::}] # combo # [{; }
+  }];
 }
 
 // Assign
-def ConAssignOp : UnaryConOp<"=(x)"> {
+def ConAssignOp : UnaryConOp<"=(x)", "assign", "none"> {
   let summary = "=(x) contraction";
 }
 
-def ConAssignAddOp : BinaryConOp<"=(x+y)"> {
+def ConAssignAddOp : BinaryConOp<"=(x+y)", "assign", "add"> {
   let summary = "=(x + y) contraction";
 }
 
-def ConAssignCondOp : TernaryConOp<"=(x==y?z)"> {
+def ConAssignCondOp : TernaryConOp<"=(x==y?z)", "assign", "cond"> {
   let summary = "=(x == y ? z) contraction";
 }
 
-def ConAssignEqOp : BinaryConOp<"=(x==y)"> {
+def ConAssignEqOp : BinaryConOp<"=(x==y)", "assign", "eq"> {
   let summary = "=(x == y) contraction";
 }
 
-def ConAssignMulOp : BinaryConOp<"=(x*y)"> {
+def ConAssignMulOp : BinaryConOp<"=(x*y)", "assign", "mul"> {
   let summary = "=(x * y) contraction";
 }
 
 // Max
-def ConMaxOp : UnaryConOp<">(x)"> {
+def ConMaxOp : UnaryConOp<">(x)", "max", "none"> {
   let summary = ">(x) contraction";
 }
 
-def ConMaxAddOp : BinaryConOp<">(x+y)"> {
+def ConMaxAddOp : BinaryConOp<">(x+y)", "max", "add"> {
   let summary = ">(x + y) contraction";
 }
 
-def ConMaxCondOp : TernaryConOp<">(x==y?z)"> {
+def ConMaxCondOp : TernaryConOp<">(x==y?z)", "max", "cond"> {
   let summary = ">(x == y ? z) contraction";
 }
 
-def ConMaxEqOp : BinaryConOp<">(x==y)"> {
+def ConMaxEqOp : BinaryConOp<">(x==y)", "max", "eq"> {
   let summary = ">(x == y) contraction";
 }
 
-def ConMaxMulOp : BinaryConOp<">(x*y)"> {
+def ConMaxMulOp : BinaryConOp<">(x*y)", "max", "mul"> {
   let summary = ">(x * y) contraction";
 }
 
 // Min
-def ConMinOp : UnaryConOp<"<(x)"> {
+def ConMinOp : UnaryConOp<"<(x)", "min", "none"> {
   let summary = "<(x) contraction";
 }
 
-def ConMinAddOp : BinaryConOp<"<(x+y)"> {
+def ConMinAddOp : BinaryConOp<"<(x+y)", "min", "add"> {
   let summary = "<(x + y) contraction";
 }
 
-def ConMinCondOp : TernaryConOp<"<(x==y?z)"> {
+def ConMinCondOp : TernaryConOp<"<(x==y?z)", "min", "cond"> {
   let summary = "<(x == y ? z) contraction";
 }
 
-def ConMinEqOp : BinaryConOp<"<(x==y)"> {
+def ConMinEqOp : BinaryConOp<"<(x==y)", "min", "eq"> {
   let summary = "<(x == y) contraction";
 }
 
-def ConMinMulOp : BinaryConOp<"<(x*y)"> {
+def ConMinMulOp : BinaryConOp<"<(x*y)", "min", "mul"> {
   let summary = "<(x * y) contraction";
 }
 
 // Prod
-def ConProdOp : UnaryConOp<"*(x)"> {
+def ConProdOp : UnaryConOp<"*(x)", "mul", "none"> {
   let summary = "*(x) contraction";
 }
 
-def ConProdAddOp : BinaryConOp<"*(x+y)"> {
+def ConProdAddOp : BinaryConOp<"*(x+y)", "mul", "add"> {
   let summary = "*(x + y) contraction";
 }
 
-def ConProdCondOp : TernaryConOp<"*(x==y?z)"> {
+def ConProdCondOp : TernaryConOp<"*(x==y?z)", "mul", "cond"> {
   let summary = "*(x == y ? z) contraction";
 }
 
-def ConProdEqOp : BinaryConOp<"*(x==y)"> {
+def ConProdEqOp : BinaryConOp<"*(x==y)", "mul", "eq"> {
   let summary = "*(x == y) contraction";
 }
 
-def ConProdMulOp : BinaryConOp<"*(x*y)"> {
+def ConProdMulOp : BinaryConOp<"*(x*y)", "mul", "mul"> {
   let summary = "*(x * y) contraction";
 }
 
 // Sum
-def ConSumOp : UnaryConOp<"+(x)"> {
+def ConSumOp : UnaryConOp<"+(x)", "add", "none"> {
   let summary = "+(x) contraction";
 }
 
-def ConSumAddOp : BinaryConOp<"+(x+y)"> {
+def ConSumAddOp : BinaryConOp<"+(x+y)", "add", "add"> {
   let summary = "+(x + y) contraction";
 }
 
-def ConSumCondOp : TernaryConOp<"+(x==y?z)"> {
+def ConSumCondOp : TernaryConOp<"+(x==y?z)", "add", "cond"> {
   let summary = "+(x == y ? z) contraction";
 }
 
-def ConSumEqOp : BinaryConOp<"+(x==y)"> {
+def ConSumEqOp : BinaryConOp<"+(x==y)", "add", "eq"> {
   let summary = "+(x == y) contraction";
 }
 
-def ConSumMulOp : BinaryConOp<"+(x*y)"> {
+def ConSumMulOp : BinaryConOp<"+(x*y)", "add", "mul"> {
   let summary = "+(x * y) contraction";
+}
+
+class SpecialOp<string mnemonic, list<OpTrait> traits = [NoSideEffect]> :
+    Op<TileDialect, mnemonic, !listconcat(traits, [SpecialOpInterface, GenericBuilderInterface])> {
+
+  let extraClassDeclaration = [{
+    static Type getResultType(ArrayRef<Value*> operands);
+
+    static Operation* create(OpBuilder* builder, Location loc, Type type, ArrayRef<Value*> operands) {
+      OperationState state(loc, getOperationName());
+      state.addOperands(operands);
+      state.addAttribute("type", TypeAttr::get(type));
+      state.addTypes(getResultType(operands));
+      return builder->createOperation(state);
+    }
+  }];
+}
+
+def GatherOp : SpecialOp<"gather">, HasCanonicalizer {
+  let summary = "special gather operation";
+  let arguments = (ins Eltwise_AnyTensor:$tensor, Eltwise_IntegerTensor:$dims);
+  let results = (outs Eltwise_AnyTensor:$result);
+
+  let builders = [OpBuilder<
+    "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(getResultType(operands));
+    }]
+  >];
+}
+
+def IndexOp : SpecialOp<"index">, HasCanonicalizer {
+  let summary = "tensor index lookup operation";
+  let arguments = (ins Eltwise_AnyTensor:$tensor, Eltwise_Integer:$dim);
+  let results = (outs Eltwise_IntegerTensor:$result);
+
+  let builders = [OpBuilder<
+    "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(getResultType(operands));
+    }]
+  >];
+}
+
+def PrngOp : SpecialOp<"prng">, HasCanonicalizer {
+  let summary = "pseudorandom number generator";
+  let arguments = (ins Eltwise_AnyTensor:$state, Variadic<Eltwise_Integer>:$dims);
+  let results = (outs Eltwise_AnyTensor:$result);
+
+  let builders = [OpBuilder<
+    "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(getResultType(operands));
+    }]
+  >];
+}
+
+def ReshapeOp : SpecialOp<"reshape">, HasCanonicalizer {
+  let summary = "tensor reshape operation";
+  let arguments = (ins Eltwise_AnyTensor:$tensor, Variadic<Eltwise_Integer>:$dims);
+  let results = (outs Eltwise_AnyTensor:$result);
+
+  let builders = [OpBuilder<
+    "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(getResultType(operands));
+    }]
+  >];
+}
+
+// TODO
+// def ScatterOp : SpecialOp<"scatter">, HasCanonicalizer {
+//   let summary = "special scatter operation";
+//   let arguments = (ins Eltwise_AnyTensor:$tensor, Eltwise_IntegerTensor:$dims, Eltwise_AnyTensor:$other);
+//   let results = (outs Eltwise_AnyTensor:$result);
+
+//   let builders = [OpBuilder<
+//     "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+//       result.addOperands(operands);
+//       result.addTypes(getResultType(operands));
+//     }]
+//   >];
+// }
+
+def ShapeOp : SpecialOp<"shape">, HasCanonicalizer {
+  let summary = "tensor shape operation";
+  let arguments = (ins Eltwise_AnyTensor:$tensor);
+  let results = (outs Eltwise_IntegerTensor:$result);
+
+  let builders = [OpBuilder<
+    "Builder* builder, OperationState& result, ScalarType type, ArrayRef<Value*> operands", [{
+      result.addOperands(operands);
+      result.addTypes(getResultType(operands));
+    }]
+  >];
 }

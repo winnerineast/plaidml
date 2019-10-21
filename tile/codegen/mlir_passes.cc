@@ -8,6 +8,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "pmlc/dialect/eltwise/util.h"
 #include "pmlc/dialect/stripe/padding_pass.h"
 #include "pmlc/dialect/stripe/transcode.h"
 #include "tile/codegen/compile_pass.h"
@@ -38,20 +39,18 @@ CompilerState::~CompilerState() = default;
 void ConvertFromMLIR(CompilerState* state) {
   IVLOG(1, "Converting from Stripe MLIR");
   *state->prog = *pmlc::dialect::stripe::FromMLIR(*state->mlir->module);
-  std::cout << "New\n";
-  std::cout << *state->prog->entry;
+  IVLOG(3, "New\n" << *state->prog->entry);
 }
 
 void ConvertIntoMLIR(CompilerState* state) {
   IVLOG(1, "Converting to Stripe MLIR");
-  std::cout << "Original\n";
-  std::cout << *state->prog->entry;
+  IVLOG(3, "Original\n" << *state->prog->entry);
   state->mlir->module = pmlc::dialect::stripe::IntoMLIR(&state->mlir->ctx, *state->prog);
-  state->mlir->module->dump();
+  IVLOG(3, "New\n" << *state->mlir->module);
 }
 
 template <typename Pass, typename Config>
-std::unique_ptr<mlir::FunctionPassBase> CreatePass(Config config) {
+std::unique_ptr<mlir::Pass> CreatePass(Config config) {
   return std::make_unique<Pass>(config);
 }
 
@@ -61,7 +60,7 @@ class MlirCompilePass : public CompilePass {
   bool is_stripe() const override { return false; }
   explicit MlirCompilePass(const Config& cfg) : config(cfg) {}
   void Apply(CompilerState* root) const override {
-    mlir::PassManager pm;
+    mlir::PassManager pm(&root->mlir->ctx, true);
     pm.addPass(mlir::createCSEPass());
     pm.addPass(CreatePass<Pass>(config));
     if (failed(pm.run(*root->mlir->module))) {

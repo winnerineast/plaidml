@@ -5,14 +5,9 @@
 #include "pmlc/dialect/eltwise/types.h"
 
 #include "mlir/IR/Module.h"
+#include "mlir/IR/Operation.h"
 #include "mlir/IR/StandardTypes.h"
 #include "mlir/IR/Value.h"
-
-namespace mlir {
-
-std::ostream& operator<<(std::ostream& os, ModuleOp op);
-
-}  // namespace mlir
 
 namespace pmlc {
 namespace dialect {
@@ -22,10 +17,7 @@ llvm::SmallVector<int64_t, 4> ComputeShape(llvm::ArrayRef<mlir::Value*> operands
 
 mlir::Type ComputeResultType(llvm::ArrayRef<mlir::Value*> operands, DataType override = DataType::INVALID);
 
-// Adjust the result types on the containing FuncOp if this op relates to an output
-void UpdateFuncOpType(mlir::Operation* op);
-
-mlir::RankedTensorType GetTensorType(mlir::Type type);
+mlir::RankedTensorType getRankedTensorType(mlir::Type type);
 
 using UnaryCalculate = std::function<double(double)>;
 mlir::Attribute constFoldUnaryOp(llvm::ArrayRef<mlir::Attribute> operands, UnaryCalculate calculate);
