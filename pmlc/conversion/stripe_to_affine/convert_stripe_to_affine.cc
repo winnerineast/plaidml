@@ -1,6 +1,7 @@
 // Copyright 2019 Intel Corporation
 
 #include "pmlc/conversion/stripe_to_affine/convert_stripe_to_affine.h"
+#include "pmlc/dialect/stripe/dialect.h"
 #include "pmlc/dialect/stripe/ops.h"
 
 #include "mlir/Dialect/AffineOps/AffineOps.h"
@@ -31,6 +32,7 @@ void ConvertStripeToAffine::runOnFunction() {
     // TODO: FuncOp is legal only if types have been converted to Std types.
     return true;  // typeConverter.isSignatureLegal(op.getType());
   });
+  target.addIllegalDialect<pmlc::dialect::stripe::Dialect>();
 
   if (failed(mlir::applyFullConversion(getFunction(), target, patterns))) {
     signalPassFailure();

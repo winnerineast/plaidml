@@ -17,6 +17,9 @@
 #include "pmlc/dialect/stripe/transcode.h"
 #include "pmlc/dialect/stripe/types.h"
 
+#include "pmlc/conversion/stripe_to_affine/convert_stripe_to_affine.h"
+#include "pmlc/conversion/stripe_to_spirv/convert_stripe_to_spirv.h"
+
 #include "base/util/logging.h"
 #include "testing/matchers.h"
 #include "tile/codegen/compile_pass.h"
@@ -89,6 +92,8 @@ static void RunTest(const lang::RunInfo& ri, bool addLocations) {
   IVLOG(2, "Original version:");
   IVLOG(2, *prog->entry);
 
+  std::cout << *prog->entry << std::endl;
+
   IVLOG(1, "Converting to MLIR");
   auto module = IntoMLIR(&context, *prog);
 
@@ -103,10 +108,13 @@ static void RunTest(const lang::RunInfo& ri, bool addLocations) {
   pm.addPass(mlir::createCSEPass());
   codegen::proto::MLIR_PadPass options;
   pm.addPass(CreatePass<PaddingPass>(options));
+  // pm.addPass(mlir::createConvertStripeToAffinePass());
+  pm.addPass(mlir::createStripeToSPIRVLoweringPass());
   if (failed(pm.run(*module))) {
     module->dump();
     throw std::runtime_error("MLIR passes failure");
   }
+  module->dump();
 
   IVLOG(1, "Writing out module");
   auto moduleOp = *module;

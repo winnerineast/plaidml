@@ -144,5 +144,7 @@ plaidml_cc_test(
         "//tile/codegen",
         "//tile/lang",
         "//tile/lib",
+        "//pmlc/conversion/stripe_to_affine",
+        "//pmlc/conversion/stripe_to_spirv",
     ],
 )

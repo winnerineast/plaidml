@@ -9,6 +9,8 @@ TBLGEN_ACTIONS = [
     "-gen-op-interface-defs",
     "-gen-reference-implementations",
     "-gen-rewriters",
+    "-gen-spirv-serialization",
+    "-gen-spirv-op-utils",
 ]
 
 COPTS = select({

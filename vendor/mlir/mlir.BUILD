@@ -139,6 +139,54 @@ mlir_tblgen(
 )
 
 mlir_tblgen(
+    name = "gen-spirv-op-decls",
+    src = "include/mlir/Dialect/SPIRV/SPIRVOps.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVOps.h.inc",
+    action = "-gen-op-decls",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-spirv-enum-decls",
+    src = "include/mlir/Dialect/SPIRV/SPIRVBase.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVEnums.h.inc",
+    action = "-gen-enum-decls",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-spirv-op-defs",
+    src = "include/mlir/Dialect/SPIRV/SPIRVOps.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVOps.cpp.inc",
+    action = "-gen-op-defs",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-spirv-enum-defs",
+    src = "include/mlir/Dialect/SPIRV/SPIRVBase.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVEnums.cpp.inc",
+    action = "-gen-enum-defs",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-spirv-serialization",
+    src = "include/mlir/Dialect/SPIRV/SPIRVOps.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVSerialization.inc",
+    action = "-gen-spirv-serialization",
+    incs = ["include"],
+)
+
+mlir_tblgen(
+    name = "gen-spirv-op-utils",
+    src = "include/mlir/Dialect/SPIRV/SPIRVBase.td",
+    out = "include/mlir/Dialect/SPIRV/SPIRVOpUtils.inc",
+    action = "-gen-spirv-op-utils",
+    incs = ["include"],
+)
+
+mlir_tblgen(
     name = "gen-llvm-op-decls",
     src = "include/mlir/Dialect/LLVMIR/LLVMOps.td",
     out = "include/mlir/Dialect/LLVMIR/LLVMOps.h.inc",
@@ -328,6 +376,36 @@ cc_library(
         ":Analysis",
         "@llvm//:support",
     ],
+)
+
+cc_library(
+    name = "SPIRVIR",
+    srcs = glob([
+        "lib/Dialect/SPIRV/SPIRVDialect.cpp",
+    ]),
+    hdrs = [
+        "include/mlir/Dialect/SPIRV/SPIRVEnums.cpp.inc",
+        "include/mlir/Dialect/SPIRV/SPIRVEnums.h.inc",
+        "include/mlir/Dialect/SPIRV/SPIRVOpUtils.inc",
+        "include/mlir/Dialect/SPIRV/SPIRVOps.cpp.inc",
+        "include/mlir/Dialect/SPIRV/SPIRVOps.h.inc",
+        "include/mlir/Dialect/SPIRV/SPIRVSerialization.inc",
+    ],
+    copts = PLATFORM_COPTS,
+    includes = ["include"],
+    deps = [
+        ":Analysis",
+        ":gen-spirv-enum-decls",
+        ":gen-spirv-enum-defs",
+        ":gen-spirv-op-decls",
+        ":gen-spirv-op-defs",
+        ":gen-spirv-op-utils",
+        ":gen-spirv-serialization",
+        "@llvm//:asm_parser",
+        "@llvm//:core",
+        "@llvm//:support",
+    ],
+    alwayslink = 1,
 )
 
 cc_library(
@@ -533,9 +611,9 @@ cc_library(
     includes = ["include"],
     deps = [
         ":StandardOps",
+        ":gen-loop-like-interface-decls",
         ":gen-loop-op-decls",
         ":gen-loop-op-defs",
-        ":gen-loop-like-interface-decls",
         "@llvm//:support",
     ],
     alwayslink = 1,
