@@ -382,6 +382,11 @@ void ApplyCache(const AliasMap& alias_map,    //
   }
   ref_it->mut().access = ref_local_access;
 
+  if (local_access == ref_local_access) {
+    const auto& ref = cache_block->ref_by_into(dir == RefDir::In ? "dst" : "src");
+    ref->mut().set_tag("same_access");
+  }
+
   // Update inner blocks strides + locations
   FixupMiddleBlockRefs(outer_block, ref_block, var_name, raw_name,
     IsReadDir(dir) ? load_tags : store_tags);

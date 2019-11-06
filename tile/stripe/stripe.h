@@ -222,6 +222,13 @@ struct BankDimension {
   size_t dim_pos;
 };
 
+struct Extent {
+  int64_t min;
+  int64_t max;
+};
+
+std::ostream& operator<<(std::ostream& os, const stripe::Extent& extent);
+
 struct Refinement : Taggable {
   Refinement() = default;
   Refinement(RefDir dir,                             //
@@ -270,6 +277,7 @@ struct Refinement : Taggable {
   boost::optional<Affine> cache_unit;       // Which cache we should use when encaching this refinement
 
   Affine FlatAccess() const;
+  std::vector<Extent> Extents(const std::vector<Index>& idxs) const;
   TensorShape ApplyTile(const std::map<std::string, size_t>& tile_by_name) const;
 
   // Returns a mutable Refinement from a const Refinement.  This is
@@ -578,6 +586,7 @@ void FindBlocksByTag(std::vector<const Block*>* into, const Block& block, const 
 const Index* FindIndexByTag(const Block& block, const std::string& tag);
 
 bool InsertAfterBlock(Block* parent, Block* sub, std::shared_ptr<Statement> stmt);
+bool ReplaceBlock(Block* parent, Block* sub, std::shared_ptr<Statement> stmt);
 
 template <typename F>
 void PreIterate(Block* block, const F& func) {

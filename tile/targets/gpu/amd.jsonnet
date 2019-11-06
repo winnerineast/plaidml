@@ -16,7 +16,7 @@ local PARAMS = {
     NUM_THREADS: 256,
     CACHE_WIDTH: 128,
     NUM_UNITS: 16,
-    REGS_MEM_B: 128,
+    REGS_MEM_B: 256,
     REG_MEM_LAT: 1,
     LOCAL_MEM_LAT: 30,
     GLOBAL_MEM_LAT: 100,
@@ -341,7 +341,7 @@ local PARAMS = {
                 local_memory_latency: PARAMS[cfg].LOCAL_MEM_LAT,
                 register_latency: PARAMS[cfg].REG_MEM_LAT,
                 comp_parent_tag: 'contract_middle',
-                index_order: 'cache',
+                index_order: 'comp',
                 align_size: PARAMS[cfg].ALIGN_SIZE_B,
               }
             },
