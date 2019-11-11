@@ -384,7 +384,21 @@ void ApplyCache(const AliasMap& alias_map,    //
 
   if (local_access == ref_local_access) {
     const auto& ref = cache_block->ref_by_into(dir == RefDir::In ? "dst" : "src");
-    ref->mut().set_tag("same_access");
+    // To determine if all index in cache block
+    // are same as that in the reference block
+    bool same_idxs = true;
+    for (auto& idx : cache_block->idxs) {
+      Index* ref_idx = ref_block->idx_by_name(idx.name);
+      if (!ref_idx || ref_idx->range != idx.range) {
+        same_idxs = false;
+        break;
+      }
+    }
+    if (same_idxs) {
+      // If index and access are both consistent,
+      // set same_access tag for the reg_cache pass
+      ref->mut().set_tag("same_access");
+    }
   }
 
   // Update inner blocks strides + locations
